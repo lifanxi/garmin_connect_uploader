@@ -103,6 +103,39 @@ class PurgeSummary:
 
 
 @dataclass(frozen=True)
+class DuplicateTrackGroup:
+    token: str
+    source_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class PointRelation:
+    first_source_path: Path
+    second_source_path: Path
+    timestamp_utc: datetime
+    first_latitude: float
+    first_longitude: float
+    second_latitude: float
+    second_longitude: float
+
+
+@dataclass(frozen=True)
+class PointRelationSummary:
+    first_source_path: Path
+    second_source_path: Path
+    count: int
+    examples: tuple[PointRelation, ...] = ()
+
+
+@dataclass(frozen=True)
+class PrecheckReport:
+    checked_count: int
+    duplicate_groups: tuple[DuplicateTrackGroup, ...] = ()
+    overlapping_points: tuple[PointRelationSummary, ...] = ()
+    conflicting_points: tuple[PointRelationSummary, ...] = ()
+
+
+@dataclass(frozen=True)
 class UploadResult:
     activity_id: int | None = None
     raw: Any = None

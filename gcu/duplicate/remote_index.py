@@ -5,6 +5,7 @@ from datetime import date
 
 from gcu.app.models import RemoteActivity
 from gcu.duplicate.fingerprint import extract_token
+from gcu.garmin.signature import is_gcu_activity
 
 
 @dataclass
@@ -18,7 +19,7 @@ class RemoteActivityIndex:
         index = cls(activities=activities)
         for activity in activities:
             token = extract_token(activity.activity_name)
-            if token:
+            if token and is_gcu_activity(activity):
                 index.by_token[token] = activity
             if activity.begin_timestamp_ms is not None:
                 activity_date = _date_from_epoch_ms(activity.begin_timestamp_ms)

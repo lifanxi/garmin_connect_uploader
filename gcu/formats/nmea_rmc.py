@@ -92,6 +92,7 @@ class NmeaRmcReader:
         return sentence_type in self.supported_sentence_types
 
     def _parse_rmc(self, line: str) -> TrackPoint | None:
+        self._verify_checksum(line)
         payload = line[1:] if line.startswith("$") else line
         payload = payload.split("*", 1)[0]
         fields = payload.split(",")
@@ -147,6 +148,24 @@ class NmeaRmcReader:
 
     def _knots_to_mps(self, speed_knots: float) -> float:
         return speed_knots * 0.514444
+
+    def _verify_checksum(self, line: str) -> None:
+        if "*" not in line:
+            return
+        payload, checksum_text = line.split("*", 1)
+        payload = payload[1:] if payload.startswith("$") else payload
+        checksum_text = checksum_text[:2]
+        if len(checksum_text) != 2:
+            raise ValueError("invalid checksum")
+        expected = 0
+        for character in payload:
+            expected ^= ord(character)
+        try:
+            actual = int(checksum_text, 16)
+        except ValueError as exc:
+            raise ValueError("invalid checksum") from exc
+        if expected != actual:
+            raise ValueError(f"checksum mismatch: expected {expected:02X}, got {actual:02X}")
 
     def _default_display_name(
         self,

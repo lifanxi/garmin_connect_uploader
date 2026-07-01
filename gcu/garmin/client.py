@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +93,10 @@ class GarminClient:
             f"/activity-service/activity/{activity_id}",
             method="DELETE",
         )
+
+    def ping(self) -> None:
+        today = date.today()
+        self.list_activities(today - timedelta(days=7), today)
 
     def wait_for_activity_match(
         self,

@@ -6,8 +6,9 @@ from datetime import date
 from pathlib import Path
 
 from gcu.app.models import RemoteActivity
+from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
-from gcu.cli.output import print_decisions, print_local_tracks, print_purge_summary
+from gcu.cli.output import print_decisions, print_local_tracks, print_precheck_report, print_purge_summary
 from gcu.duplicate.matcher import MatchOptions
 from gcu.export.fit_writer import write_fit
 from gcu.formats.base import FormatOptions
@@ -47,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser("inspect", help="Parse tracks and show local metadata")
     add_common_file_args(inspect_parser)
     inspect_parser.set_defaults(func=cmd_inspect)
+
+    precheck_parser = subparsers.add_parser("pre-check", help="Check local tracks for duplicates and point conflicts")
+    add_common_file_args(precheck_parser)
+    precheck_parser.set_defaults(func=cmd_precheck)
 
     convert_parser = subparsers.add_parser("convert", help="Convert track files to FIT")
     add_common_file_args(convert_parser)
@@ -114,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     purge_parser.add_argument("--dry-run", action="store_true", help="Show matching activities without deleting")
     purge_parser.add_argument("--yes", action="store_true", help="Actually delete signed GCU activities")
+    purge_parser.add_argument("--chunk-days", type=int, default=366, help="Activity search window size in days")
     purge_parser.add_argument("--json", action="store_true", help="Emit JSON")
     purge_parser.set_defaults(func=cmd_purge)
 
@@ -178,6 +184,13 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def cmd_precheck(args) -> int:
+    options = _sync_options(args, dry_run=True)
+    report = PrecheckService().check(_existing_files(args.files), options)
+    print_precheck_report(report, as_json=args.json)
+    return 0
+
+
 def cmd_convert(args) -> int:
     service = SyncService()
     local_tracks = service.inspect(_existing_files(args.files), _sync_options(args, dry_run=True))
@@ -233,6 +246,7 @@ def cmd_purge(args) -> int:
         start_date=args.start_date,
         end_date=args.end_date or date.today(),
         dry_run=args.dry_run,
+        chunk_days=args.chunk_days,
     )
     print_purge_summary(summary, as_json=args.json)
     return 0
@@ -248,6 +262,7 @@ def cmd_auth_login(args) -> int:
 def cmd_auth_status(args) -> int:
     garmin = _garmin(args)
     garmin.ensure_session(args.username, args.password)
+    garmin.ping()
     print(f"Garmin session is usable for {args.domain}")
     return 0
 

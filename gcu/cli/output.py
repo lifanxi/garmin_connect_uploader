@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from gcu.app.models import LocalTrack, PurgeSummary, SyncDecision
+from gcu.app.models import LocalTrack, PrecheckReport, PurgeSummary, SyncDecision
 
 
 def print_local_tracks(items: list[LocalTrack], as_json: bool = False) -> None:
@@ -56,6 +56,40 @@ def print_purge_summary(summary: PurgeSummary, as_json: bool = False) -> None:
             f"{item.status:<{width}} activity={item.activity_id} "
             f"manufacturer={item.manufacturer} deviceId={item.device_id} {item.activity_name}"
         )
+
+
+def print_precheck_report(report: PrecheckReport, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(_jsonable(report), ensure_ascii=False, indent=2))
+        return
+
+    print(f"checked={report.checked_count}")
+    print(f"duplicate_track_groups={len(report.duplicate_groups)}")
+    for group in report.duplicate_groups:
+        print(f"  token={group.token}")
+        for path in group.source_paths:
+            print(f"    {path}")
+
+    print(f"overlapping_point_pairs={len(report.overlapping_points)}")
+    for item in report.overlapping_points:
+        print(f"  {item.first_source_path} <-> {item.second_source_path}: {item.count} same points")
+        for example in item.examples:
+            print(
+                "    "
+                f"{example.timestamp_utc.isoformat()} "
+                f"lat={example.first_latitude:.7f} lon={example.first_longitude:.7f}"
+            )
+
+    print(f"conflicting_point_pairs={len(report.conflicting_points)}")
+    for item in report.conflicting_points:
+        print(f"  {item.first_source_path} <-> {item.second_source_path}: {item.count} conflicting points")
+        for example in item.examples:
+            print(
+                "    "
+                f"{example.timestamp_utc.isoformat()} "
+                f"first=({example.first_latitude:.7f},{example.first_longitude:.7f}) "
+                f"second=({example.second_latitude:.7f},{example.second_longitude:.7f})"
+            )
 
 
 def _jsonable(value: Any) -> Any:
@@ -109,6 +143,8 @@ def _decision_summary(item: SyncDecision) -> dict[str, Any]:
                 "activity_id": candidate.activity_id,
                 "activity_name": candidate.activity_name,
                 "begin_timestamp_ms": candidate.begin_timestamp_ms,
+                "manufacturer": candidate.manufacturer,
+                "device_id": candidate.device_id,
             }
             for candidate in item.candidates
         ],

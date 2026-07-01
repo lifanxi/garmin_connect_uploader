@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -69,10 +70,24 @@ class SyncService:
         index = RemoteActivityIndex.build(garmin.list_activities(start_date, end_date))
         decisions: list[SyncDecision] = []
         pending_tagging: dict[Future[SyncDecision], Path | None] = {}
+        processed_tokens: dict[str, int | None] = {}
 
         worker_count = max(1, options.post_upload_tag_workers)
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             for local_track in local_tracks:
+                if local_track.token in processed_tokens:
+                    decisions.append(
+                        SyncDecision(
+                            source_path=local_track.track_file.source_path,
+                            status="skip-token",
+                            token=local_track.token,
+                            planned_name=local_track.planned_name,
+                            activity_id=processed_tokens[local_track.token],
+                            message="duplicate local track in same batch",
+                        )
+                    )
+                    continue
+
                 decision = self._decide(local_track, index, options)
                 if decision.status == "skip-legacy-match" and not options.dry_run and decision.activity_id is not None:
                     match = self._single_candidate(decision)
@@ -80,6 +95,7 @@ class SyncService:
                         decisions.append(self._signature_rejected_decision(local_track, match))
                         continue
                     garmin.update_activity_name(decision.activity_id, decision.planned_name)
+                    processed_tokens[local_track.token] = decision.activity_id
                     decisions.append(
                         SyncDecision(
                             source_path=decision.source_path,
@@ -92,6 +108,8 @@ class SyncService:
                     )
                     continue
                 if decision.status != "upload" or options.dry_run:
+                    if decision.status in {"skip-token", "skip-legacy-match"}:
+                        processed_tokens[local_track.token] = decision.activity_id
                     decisions.append(decision)
                     continue
 
@@ -101,13 +119,16 @@ class SyncService:
                     upload_result = garmin.upload_activity(fit_path)
                 except DuplicateUploadError:
                     conflict_decision = self._resolve_upload_conflict(local_track, garmin, options)
+                    if conflict_decision.activity_id is not None and conflict_decision.status == "upload-conflict":
+                        processed_tokens[local_track.token] = conflict_decision.activity_id
                     decisions.append(conflict_decision)
                     self._cleanup_fit(fit_path, options)
                     continue
 
                 activity_id = getattr(upload_result, "activity_id", None)
                 if activity_id is not None:
-                    uploaded_activity = self._lookup_activity_by_id(local_track, garmin, activity_id)
+                    wait_s = self._estimated_post_upload_wait_s(local_track, options)
+                    uploaded_activity = self._wait_for_uploaded_activity(local_track, garmin, wait_s, activity_id)
                     if uploaded_activity is None:
                         decisions.append(
                             SyncDecision(
@@ -116,9 +137,10 @@ class SyncService:
                                 token=local_track.token,
                                 planned_name=local_track.planned_name,
                                 activity_id=activity_id,
-                                message="uploaded; activity signature unavailable, not tagged",
+                                message=f"uploaded; activity signature unavailable after {wait_s}s, not tagged",
                             )
                         )
+                        processed_tokens[local_track.token] = activity_id
                         self._cleanup_fit(fit_path, options)
                         continue
                     if not is_gcu_activity(uploaded_activity):
@@ -126,6 +148,7 @@ class SyncService:
                         self._cleanup_fit(fit_path, options)
                         continue
                     garmin.update_activity_name(activity_id, local_track.planned_name)
+                    processed_tokens[local_track.token] = activity_id
                     decisions.append(
                         SyncDecision(
                             source_path=local_track.track_file.source_path,
@@ -139,6 +162,7 @@ class SyncService:
                     self._cleanup_fit(fit_path, options)
                     continue
 
+                processed_tokens[local_track.token] = None
                 future = executor.submit(self._tag_after_upload, local_track, garmin, options)
                 pending_tagging[future] = fit_path
 
@@ -253,50 +277,55 @@ class SyncService:
         start_date: date,
         end_date: date,
         dry_run: bool = False,
+        chunk_days: int = 366,
     ) -> PurgeSummary:
-        activities = garmin.list_activities(start_date, end_date)
         decisions: list[PurgeDecision] = []
         skipped_unsigned_count = 0
         deleted_count = 0
+        scanned_count = 0
+        seen_activity_ids: set[int] = set()
 
-        for activity in activities:
-            if not is_gcu_activity(activity):
-                skipped_unsigned_count += 1
-                continue
+        for chunk_start, chunk_end in _date_chunks(start_date, end_date, max(1, chunk_days)):
+            activities = garmin.list_activities(chunk_start, chunk_end)
+            for activity in activities:
+                if activity.activity_id in seen_activity_ids:
+                    continue
+                seen_activity_ids.add(activity.activity_id)
+                scanned_count += 1
+                if not is_gcu_activity(activity):
+                    skipped_unsigned_count += 1
+                    continue
 
-            if dry_run:
+                if dry_run:
+                    decisions.append(
+                        PurgeDecision(
+                            activity_id=activity.activity_id,
+                            activity_name=activity.activity_name,
+                            status="would-delete",
+                            manufacturer=activity.manufacturer,
+                            device_id=activity.device_id,
+                            message="signed GCU activity",
+                        )
+                    )
+                    continue
+
+                garmin.delete_activity(activity.activity_id)
+                deleted_count += 1
                 decisions.append(
                     PurgeDecision(
                         activity_id=activity.activity_id,
                         activity_name=activity.activity_name,
-                        status="would-delete",
+                        status="deleted",
                         manufacturer=activity.manufacturer,
                         device_id=activity.device_id,
-                        message="signed GCU activity",
+                        message="signed GCU activity deleted",
                     )
                 )
-                continue
-
-            if not is_gcu_activity(activity):
-                skipped_unsigned_count += 1
-                continue
-            garmin.delete_activity(activity.activity_id)
-            deleted_count += 1
-            decisions.append(
-                PurgeDecision(
-                    activity_id=activity.activity_id,
-                    activity_name=activity.activity_name,
-                    status="deleted",
-                    manufacturer=activity.manufacturer,
-                    device_id=activity.device_id,
-                    message="signed GCU activity deleted",
-                )
-            )
 
         return PurgeSummary(
             start_date=start_date,
             end_date=end_date,
-            scanned_count=len(activities),
+            scanned_count=scanned_count,
             matched_count=len(decisions),
             deleted_count=deleted_count,
             skipped_unsigned_count=skipped_unsigned_count,
@@ -424,21 +453,56 @@ class SyncService:
             max_wait_s=max_wait_s,
         )
 
-    def _lookup_activity_by_id(
+    def _wait_for_uploaded_activity(
         self,
         local_track: LocalTrack,
         garmin: GarminGateway,
-        activity_id: int,
+        max_wait_s: int,
+        activity_id: int | None = None,
     ) -> RemoteActivity | None:
         metadata = local_track.track_file.track.metadata
-        activities = garmin.list_activities(
+        local_start_ms = int(metadata.start_time_utc.timestamp() * 1000)
+        started = time.time()
+        delays = [1, 2, 3, 5, 5, 5, 5]
+
+        def matches_track(activity: RemoteActivity) -> bool:
+            if activity.begin_timestamp_ms is None:
+                return False
+            if activity.start_latitude is None or activity.start_longitude is None:
+                return False
+            time_diff_s = abs(activity.begin_timestamp_ms - local_start_ms) / 1000
+            lat_diff = abs(activity.start_latitude - metadata.start_latitude)
+            lon_diff = abs(activity.start_longitude - metadata.start_longitude)
+            return (
+                time_diff_s <= self._default_post_upload_time_tolerance_s
+                and lat_diff <= self._default_post_upload_coord_tolerance_deg
+                and lon_diff <= self._default_post_upload_coord_tolerance_deg
+            )
+
+        while True:
+            for activity in self._list_nearby_activities(local_track, garmin):
+                if activity_id is not None and activity.activity_id == activity_id:
+                    return activity
+                if matches_track(activity):
+                    return activity
+            elapsed = time.time() - started
+            delay = delays[0] if delays else 5
+            if elapsed + delay > max_wait_s:
+                return None
+            time.sleep(delay)
+            if delays:
+                delays = delays[1:]
+
+    def _list_nearby_activities(
+        self,
+        local_track: LocalTrack,
+        garmin: GarminGateway,
+    ) -> list[RemoteActivity]:
+        metadata = local_track.track_file.track.metadata
+        return garmin.list_activities(
             metadata.start_time_utc.date() - timedelta(days=1),
             metadata.start_time_utc.date() + timedelta(days=1),
         )
-        for activity in activities:
-            if activity.activity_id == activity_id:
-                return activity
-        return None
 
     def _resolve_upload_conflict(
         self,
@@ -502,3 +566,11 @@ class SyncService:
                 f"(manufacturer={activity.manufacturer!r}, deviceId={activity.device_id!r}); refusing to modify"
             ),
         )
+
+
+def _date_chunks(start_date: date, end_date: date, chunk_days: int):
+    current = start_date
+    while current <= end_date:
+        chunk_end = min(end_date, current + timedelta(days=chunk_days - 1))
+        yield current, chunk_end
+        current = chunk_end + timedelta(days=1)

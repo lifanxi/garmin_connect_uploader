@@ -46,6 +46,14 @@ python gcu_cli.py inspect tracks/*.CSV
 python gcu_cli.py inspect 080323-UnixCenter.txt --json
 ```
 
+Pre-check local batches for duplicate tracks, overlapping points, and
+same-timestamp coordinate conflicts:
+
+```bash
+python gcu_cli.py pre-check tracks/*.CSV
+python gcu_cli.py pre-check tracks/*.CSV --json
+```
+
 Convert to FIT:
 
 ```bash
@@ -83,6 +91,7 @@ Limit purge by date:
 
 ```bash
 python gcu_cli.py purge --dry-run --start-date 2025-01-01 --end-date 2026-07-01
+python gcu_cli.py purge --yes --chunk-days 31
 ```
 
 ## Supported Formats

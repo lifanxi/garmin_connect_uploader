@@ -7,6 +7,7 @@ from pathlib import Path
 
 from gcu.app.models import RemoteActivity, UploadResult
 from gcu.app.models import TrackPoint
+from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
 from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
 from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
@@ -121,6 +122,35 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(track_file.track.metadata.display_timezone, "America/Los_Angeles")
         self.assertEqual(track_file.track.metadata.display_city, "San Jose")
         self.assertIn("San Jose GPS Track", track_file.track.metadata.display_name)
+
+    def test_nmea_rmc_reader_rejects_bad_checksum(self):
+        text = "$GPRMC,011052.387,A,3203.7744,N,11848.7084,E,2.25,26.90,230308,,*00\n"
+        path = self._write_file(text, "bad.txt")
+
+        with self.assertRaises(ValueError):
+            NmeaRmcReader().read(path, FormatOptions())
+
+    def test_precheck_reports_duplicate_overlap_and_conflict(self):
+        duplicate_a = self._write_csv(CSV_TEXT, name="duplicate-a.CSV")
+        duplicate_b = self._write_csv(CSV_TEXT, name="duplicate-b.CSV")
+        conflict = self._write_csv(
+            """INDEX,TAG,DATE,TIME,LATITUDE N/S,LONGITUDE E/W,HEIGHT,SPEED,HEADING
+1,T,251201,000001,31.0000010N,121.0000010E,1,3.6,80
+""",
+            name="conflict.CSV",
+        )
+
+        report = PrecheckService().check(
+            [duplicate_a, duplicate_b, conflict],
+            SyncOptions(format_options=FormatOptions()),
+        )
+
+        self.assertEqual(report.checked_count, 3)
+        self.assertEqual(len(report.duplicate_groups), 1)
+        self.assertEqual(set(report.duplicate_groups[0].source_paths), {duplicate_a, duplicate_b})
+        self.assertEqual(len(report.overlapping_points), 1)
+        self.assertEqual(report.overlapping_points[0].count, 2)
+        self.assertEqual(len(report.conflicting_points), 2)
 
     def test_fingerprint_is_stable_for_same_content(self):
         path = self._write_csv(CSV_TEXT)
@@ -241,6 +271,32 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(decisions[0].status, "failed")
         self.assertEqual(garmin.updated_names, [])
         self.assertIn("not signed as GCU upload", decisions[0].message)
+
+    def test_sync_skips_duplicate_local_track_in_same_batch(self):
+        first = self._write_csv(CSV_TEXT, name="first.CSV")
+        second = self._write_csv(CSV_TEXT, name="second.CSV")
+        garmin = ImmediateUploadGarmin()
+
+        decisions = SyncService().sync([first, second], garmin, SyncOptions(format_options=FormatOptions()))
+
+        self.assertEqual(garmin.upload_count, 1)
+        self.assertEqual([decision.status for decision in decisions], ["upload", "skip-token"])
+        self.assertEqual(decisions[1].message, "duplicate local track in same batch")
+
+    def test_unsigned_remote_token_does_not_skip_upload(self):
+        path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
+        remote = RemoteActivity(
+            activity_id=777,
+            activity_name=f"External activity {local_track.token}",
+            manufacturer="GARMIN",
+            device_id=1,
+        )
+        garmin = ExistingActivityGarmin(remote)
+
+        decisions = SyncService().sync([path], garmin, SyncOptions(format_options=FormatOptions(), dry_run=True))
+
+        self.assertEqual(decisions[0].status, "upload")
 
     def test_estimated_post_upload_wait_scales_with_point_count(self):
         path = self._write_csv(CSV_TEXT)
@@ -376,11 +432,13 @@ class ImmediateUploadGarmin:
         self.next_id = 1000
         self.updated_names: list[str] = []
         self.activities: list[RemoteActivity] = []
+        self.upload_count = 0
 
     def list_activities(self, start_date, end_date):
         return self.activities
 
     def upload_activity(self, file_path):
+        self.upload_count += 1
         self.next_id += 1
         self.activities.append(
             RemoteActivity(
