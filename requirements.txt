@@ -2,3 +2,4 @@ garth>=0.8.0
 fit-tool>=0.9.15
 timezonefinder>=8.2.4
 geonamescache>=3.0.1
+tzdata>=2025.2

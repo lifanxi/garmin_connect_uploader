@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import sys
 from datetime import date
 from pathlib import Path
@@ -298,10 +299,23 @@ def _garmin(args) -> GarminClient:
 
 
 def _existing_files(paths: list[Path]) -> list[Path]:
-    missing = [path for path in paths if not path.exists()]
+    expanded = _expand_input_paths(paths)
+    missing = [path for path in expanded if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing files: {', '.join(str(path) for path in missing)}")
-    return paths
+    return expanded
+
+
+def _expand_input_paths(paths: list[Path]) -> list[Path]:
+    expanded: list[Path] = []
+    for path in paths:
+        text = str(path)
+        if any(character in text for character in "*?["):
+            matches = [Path(match) for match in glob.glob(text)]
+            expanded.extend(sorted(matches))
+        else:
+            expanded.append(path)
+    return expanded
 
 
 def _date_arg(value: str) -> date:

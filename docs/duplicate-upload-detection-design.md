@@ -223,6 +223,9 @@ python gcu_cli.py auth status
 - 跨文件同一 timestamp 且坐标相同的重叠点。
 - 跨文件同一 timestamp 但坐标不同的冲突点。
 
+CLI 需要在应用层展开 `*`、`?`、`[]` 通配符，保证 Windows PowerShell/cmd 和
+macOS/Linux shell 下的 `tracks/*.CSV` 参数行为一致。
+
 `purge` 会扫描 Garmin Connect 活动列表，仅删除签名同时满足
 `manufacturer=HOLUX` 和 `deviceId=0x12345678` 的活动。默认全时间范围扫描；
 可用 `--start-date YYYY-MM-DD` 和 `--end-date YYYY-MM-DD` 缩小范围；内部按
@@ -596,6 +599,12 @@ post_upload_wait_per_1000_points_s = 5
 post_upload_max_wait_s = 180
 post_upload_tag_workers = 4
 ```
+
+跨平台依赖要求：
+
+- Python 3.11+。
+- Windows 环境需安装 `tzdata`，以保证 `zoneinfo.ZoneInfo("Asia/Shanghai")` 等
+  IANA 时区名称可用；项目依赖清单应显式包含该包。
 
 不要在项目目录保存明文密码。会话 token 应保存在用户级配置目录。
 

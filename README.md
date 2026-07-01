@@ -37,6 +37,14 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+On Windows PowerShell:
+
+```powershell
+py -m venv venv
+.\venv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
+```
+
 ## Usage
 
 Inspect local tracks:
@@ -45,6 +53,9 @@ Inspect local tracks:
 python gcu_cli.py inspect tracks/*.CSV
 python gcu_cli.py inspect 080323-UnixCenter.txt --json
 ```
+
+The CLI expands glob patterns itself, so commands such as `tracks/*.CSV` work in
+Windows shells as well as macOS/Linux shells.
 
 Pre-check local batches for duplicate tracks, overlapping points, and
 same-timestamp coordinate conflicts:

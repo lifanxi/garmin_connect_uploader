@@ -9,6 +9,7 @@ from gcu.app.models import RemoteActivity, UploadResult
 from gcu.app.models import TrackPoint
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
+from gcu.cli.main import _existing_files
 from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
 from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
 from gcu.duplicate.remote_index import RemoteActivityIndex
@@ -151,6 +152,17 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(len(report.overlapping_points), 1)
         self.assertEqual(report.overlapping_points[0].count, 2)
         self.assertEqual(len(report.conflicting_points), 2)
+
+    def test_cli_expands_globs_for_windows_shells(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        first = root / "a.CSV"
+        second = root / "b.CSV"
+        first.write_text(CSV_TEXT, encoding="utf-8")
+        second.write_text(CSV_TEXT, encoding="utf-8")
+
+        self.assertEqual(_existing_files([root / "*.CSV"]), [first, second])
 
     def test_fingerprint_is_stable_for_same_content(self):
         path = self._write_csv(CSV_TEXT)
