@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from gcu.app.models import LocalTrack, PrecheckReport, PurgeSummary, SyncDecision
+from gcu.app.models import AuthenticatedUser, LocalTrack, PrecheckReport, PurgeSummary, SyncDecision
 
 
 def print_local_tracks(items: list[LocalTrack], as_json: bool = False) -> None:
@@ -90,6 +90,24 @@ def print_precheck_report(report: PrecheckReport, as_json: bool = False) -> None
                 f"first=({example.first_latitude:.7f},{example.first_longitude:.7f}) "
                 f"second=({example.second_latitude:.7f},{example.second_longitude:.7f})"
             )
+
+
+def print_authenticated_user(user: AuthenticatedUser, domain: str, session_dir: Path, as_json: bool = False) -> None:
+    summary = {
+        "domain": domain,
+        "session_dir": str(session_dir),
+        "username": user.username,
+        "display_name": user.display_name,
+        "full_name": user.full_name,
+        "profile_id": user.profile_id,
+    }
+    if as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+    username = user.username or "-"
+    display = f" display_name={user.display_name}" if user.display_name else ""
+    print(f"Garmin session is usable for {domain}: username={username}{display}")
+    print(f"Garmin session saved in {session_dir}")
 
 
 def _jsonable(value: Any) -> Any:

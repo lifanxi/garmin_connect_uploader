@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from gcu.app.models import RemoteActivity, UploadResult
+from gcu.app.models import AuthenticatedUser, RemoteActivity, UploadResult
 from gcu.garmin.errors import DuplicateUploadError, UploadConsentRequiredError
 
 
@@ -25,7 +25,12 @@ class GarminClient:
         self.session_dir = session_dir or (Path.home() / ".garth")
         self.garth.configure(domain=domain)
 
-    def ensure_session(self, username: str | None = None, password: str | None = None) -> None:
+    def ensure_session(
+        self,
+        username: str | None = None,
+        password: str | None = None,
+        allow_prompt: bool = True,
+    ) -> None:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         try:
             self.garth.resume(str(self.session_dir))
@@ -36,6 +41,8 @@ class GarminClient:
 
         username = username or os.environ.get("GARMIN_USERNAME")
         password = password or os.environ.get("GARMIN_PASSWORD")
+        if not allow_prompt and (not username or not password):
+            raise RuntimeError("Garmin login requires username and password when no saved session is available")
         if not username:
             username = input("Garmin username: ")
         if not password:
@@ -97,6 +104,19 @@ class GarminClient:
     def ping(self) -> None:
         today = date.today()
         self.list_activities(today - timedelta(days=7), today)
+
+    def current_user(self, fallback_username: str | None = None) -> AuthenticatedUser:
+        try:
+            profile = self.garth.UserProfile.get(client=self.garth.client)
+        except Exception:
+            username = fallback_username or getattr(self.garth.client, "username", "") or ""
+            return AuthenticatedUser(username=username)
+        return AuthenticatedUser(
+            username=profile.user_name or fallback_username or "",
+            display_name=profile.display_name or "",
+            full_name=profile.full_name or "",
+            profile_id=profile.profile_id,
+        )
 
     def wait_for_activity_match(
         self,

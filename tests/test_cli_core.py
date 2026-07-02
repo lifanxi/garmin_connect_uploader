@@ -53,7 +53,7 @@ class CoreCliTests(unittest.TestCase):
         self.assertAlmostEqual(track_file.track.points[0].speed_mps, 1.0)
         self.assertEqual(track_file.track.metadata.display_timezone, "Asia/Shanghai")
         self.assertEqual(track_file.track.metadata.display_city, "Hangzhou")
-        self.assertIn("Dec 01", track_file.track.metadata.display_name)
+        self.assertEqual(track_file.track.metadata.display_name, "Hangzhou Track Me")
 
     def test_columbus_reader_can_override_source_timezone(self):
         path = self._write_csv(CSV_TEXT)
@@ -74,8 +74,8 @@ class CoreCliTests(unittest.TestCase):
         )
 
         self.assertEqual(default_display.track.metadata.start_time_utc.hour, 18)
-        self.assertIn("Dec 02", default_display.track.metadata.display_name)
-        self.assertIn("Dec 01", utc_display.track.metadata.display_name)
+        self.assertEqual(default_display.track.metadata.display_name, "Hangzhou Track Me")
+        self.assertEqual(utc_display.track.metadata.display_name, "Hangzhou Track Me")
 
     def test_auto_display_timezone_uses_first_five_minute_majority(self):
         start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -111,7 +111,7 @@ class CoreCliTests(unittest.TestCase):
         self.assertAlmostEqual(first.speed_mps, 2.25 * 0.514444)
         self.assertEqual(track_file.track.metadata.display_timezone, "Asia/Shanghai")
         self.assertEqual(track_file.track.metadata.display_city, "Nanjing")
-        self.assertIn("Nanjing GPS Track", track_file.track.metadata.display_name)
+        self.assertEqual(track_file.track.metadata.display_name, "Nanjing Track Me")
 
     def test_nmea_rmc_reader_detects_us_display_timezone(self):
         path = self._write_file(NMEA_US_TEXT, "track.txt")
@@ -122,7 +122,7 @@ class CoreCliTests(unittest.TestCase):
         self.assertAlmostEqual(first.longitude, -121.8658466667)
         self.assertEqual(track_file.track.metadata.display_timezone, "America/Los_Angeles")
         self.assertEqual(track_file.track.metadata.display_city, "San Jose")
-        self.assertIn("San Jose GPS Track", track_file.track.metadata.display_name)
+        self.assertEqual(track_file.track.metadata.display_name, "San Jose Track Me")
 
     def test_nmea_rmc_reader_rejects_bad_checksum(self):
         text = "$GPRMC,011052.387,A,3203.7744,N,11848.7084,E,2.25,26.90,230308,,*00\n"

@@ -130,10 +130,5 @@ class ColumbusCsvReader:
         source_tz: ZoneInfo,
         city_name: str | None,
     ) -> str:
-        local_dt = start_utc.astimezone(source_tz)
-        total_minutes = max(0, int(duration_s // 60))
-        hours = total_minutes // 60
-        minutes = total_minutes % 60
-        duration = f"{hours}h {minutes}m" if hours else f"{minutes}m"
         prefix = f"{city_name} " if city_name else ""
-        return f"{prefix}GPS Track - {local_dt.strftime('%b %d')} {duration}"
+        return f"{prefix}Track Me"

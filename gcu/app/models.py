@@ -87,6 +87,8 @@ class PurgeDecision:
     status: str
     manufacturer: str | None = None
     device_id: int | None = None
+    begin_timestamp_ms: int | None = None
+    duration_s: float | None = None
     message: str = ""
 
 
@@ -139,3 +141,11 @@ class PrecheckReport:
 class UploadResult:
     activity_id: int | None = None
     raw: Any = None
+
+
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    username: str
+    display_name: str = ""
+    full_name: str = ""
+    profile_id: int | None = None

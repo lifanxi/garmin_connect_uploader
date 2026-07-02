@@ -13,6 +13,7 @@ bak/
 *.log
 
 garth_session/
+.garth_session/
 garmin_session.json/
 garmin_credentials.json
 

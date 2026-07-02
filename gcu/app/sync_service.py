@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from math import ceil
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from gcu.app.models import LocalTrack, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision
 from gcu.app.naming import planned_activity_name
@@ -54,6 +54,14 @@ class SyncService:
 
     def plan(self, files: list[Path], garmin: GarminGateway, options: SyncOptions) -> list[SyncDecision]:
         local_tracks = self.inspect(files, options)
+        return self.plan_tracks(local_tracks, garmin, options)
+
+    def plan_tracks(
+        self,
+        local_tracks: list[LocalTrack],
+        garmin: GarminGateway,
+        options: SyncOptions,
+    ) -> list[SyncDecision]:
         if not local_tracks:
             return []
         start_date, end_date = self._query_window(local_tracks)
@@ -61,8 +69,23 @@ class SyncService:
         index = RemoteActivityIndex.build(activities)
         return [self._decide(local_track, index, options) for local_track in local_tracks]
 
-    def sync(self, files: list[Path], garmin: GarminGateway, options: SyncOptions) -> list[SyncDecision]:
+    def sync(
+        self,
+        files: list[Path],
+        garmin: GarminGateway,
+        options: SyncOptions,
+        on_decision: Callable[[SyncDecision], None] | None = None,
+    ) -> list[SyncDecision]:
         local_tracks = self.inspect(files, options)
+        return self.sync_tracks(local_tracks, garmin, options, on_decision)
+
+    def sync_tracks(
+        self,
+        local_tracks: list[LocalTrack],
+        garmin: GarminGateway,
+        options: SyncOptions,
+        on_decision: Callable[[SyncDecision], None] | None = None,
+    ) -> list[SyncDecision]:
         if not local_tracks:
             return []
         local_tracks = self._sort_for_upload(local_tracks)
@@ -76,7 +99,8 @@ class SyncService:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             for local_track in local_tracks:
                 if local_track.token in processed_tokens:
-                    decisions.append(
+                    self._append_decision(
+                        decisions,
                         SyncDecision(
                             source_path=local_track.track_file.source_path,
                             status="skip-token",
@@ -84,7 +108,8 @@ class SyncService:
                             planned_name=local_track.planned_name,
                             activity_id=processed_tokens[local_track.token],
                             message="duplicate local track in same batch",
-                        )
+                        ),
+                        on_decision,
                     )
                     continue
 
@@ -92,11 +117,12 @@ class SyncService:
                 if decision.status == "skip-legacy-match" and not options.dry_run and decision.activity_id is not None:
                     match = self._single_candidate(decision)
                     if match is not None and not is_gcu_activity(match):
-                        decisions.append(self._signature_rejected_decision(local_track, match))
+                        self._append_decision(decisions, self._signature_rejected_decision(local_track, match), on_decision)
                         continue
                     garmin.update_activity_name(decision.activity_id, decision.planned_name)
                     processed_tokens[local_track.token] = decision.activity_id
-                    decisions.append(
+                    self._append_decision(
+                        decisions,
                         SyncDecision(
                             source_path=decision.source_path,
                             status="backfilled-token",
@@ -104,13 +130,14 @@ class SyncService:
                             planned_name=decision.planned_name,
                             activity_id=decision.activity_id,
                             message="token added to existing activity",
-                        )
+                        ),
+                        on_decision,
                     )
                     continue
                 if decision.status != "upload" or options.dry_run:
                     if decision.status in {"skip-token", "skip-legacy-match"}:
                         processed_tokens[local_track.token] = decision.activity_id
-                    decisions.append(decision)
+                    self._append_decision(decisions, decision, on_decision)
                     continue
 
                 fit_path = self._fit_path(local_track, options)
@@ -121,7 +148,7 @@ class SyncService:
                     conflict_decision = self._resolve_upload_conflict(local_track, garmin, options)
                     if conflict_decision.activity_id is not None and conflict_decision.status == "upload-conflict":
                         processed_tokens[local_track.token] = conflict_decision.activity_id
-                    decisions.append(conflict_decision)
+                    self._append_decision(decisions, conflict_decision, on_decision)
                     self._cleanup_fit(fit_path, options)
                     continue
 
@@ -130,7 +157,8 @@ class SyncService:
                     wait_s = self._estimated_post_upload_wait_s(local_track, options)
                     uploaded_activity = self._wait_for_uploaded_activity(local_track, garmin, wait_s, activity_id)
                     if uploaded_activity is None:
-                        decisions.append(
+                        self._append_decision(
+                            decisions,
                             SyncDecision(
                                 source_path=local_track.track_file.source_path,
                                 status="upload",
@@ -138,18 +166,24 @@ class SyncService:
                                 planned_name=local_track.planned_name,
                                 activity_id=activity_id,
                                 message=f"uploaded; activity signature unavailable after {wait_s}s, not tagged",
-                            )
+                            ),
+                            on_decision,
                         )
                         processed_tokens[local_track.token] = activity_id
                         self._cleanup_fit(fit_path, options)
                         continue
                     if not is_gcu_activity(uploaded_activity):
-                        decisions.append(self._signature_rejected_decision(local_track, uploaded_activity))
+                        self._append_decision(
+                            decisions,
+                            self._signature_rejected_decision(local_track, uploaded_activity),
+                            on_decision,
+                        )
                         self._cleanup_fit(fit_path, options)
                         continue
                     garmin.update_activity_name(activity_id, local_track.planned_name)
                     processed_tokens[local_track.token] = activity_id
-                    decisions.append(
+                    self._append_decision(
+                        decisions,
                         SyncDecision(
                             source_path=local_track.track_file.source_path,
                             status="upload",
@@ -157,7 +191,8 @@ class SyncService:
                             planned_name=local_track.planned_name,
                             activity_id=activity_id,
                             message="uploaded",
-                        )
+                        ),
+                        on_decision,
                     )
                     self._cleanup_fit(fit_path, options)
                     continue
@@ -169,12 +204,22 @@ class SyncService:
             for future in as_completed(pending_tagging):
                 fit_path = pending_tagging[future]
                 try:
-                    decisions.append(future.result())
+                    self._append_decision(decisions, future.result(), on_decision)
                 finally:
                     if fit_path is not None:
                         self._cleanup_fit(fit_path, options)
 
         return decisions
+
+    def _append_decision(
+        self,
+        decisions: list[SyncDecision],
+        decision: SyncDecision,
+        on_decision: Callable[[SyncDecision], None] | None,
+    ) -> None:
+        decisions.append(decision)
+        if on_decision is not None:
+            on_decision(decision)
 
     def _tag_after_upload(
         self,
@@ -304,6 +349,8 @@ class SyncService:
                             status="would-delete",
                             manufacturer=activity.manufacturer,
                             device_id=activity.device_id,
+                            begin_timestamp_ms=activity.begin_timestamp_ms,
+                            duration_s=activity.duration_s,
                             message="signed GCU activity",
                         )
                     )
@@ -318,6 +365,8 @@ class SyncService:
                         status="deleted",
                         manufacturer=activity.manufacturer,
                         device_id=activity.device_id,
+                        begin_timestamp_ms=activity.begin_timestamp_ms,
+                        duration_s=activity.duration_s,
                         message="signed GCU activity deleted",
                     )
                 )

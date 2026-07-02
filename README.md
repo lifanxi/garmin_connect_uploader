@@ -1,8 +1,8 @@
 # Garmin Connect Uploader
 
-Garmin Connect Uploader (`gcu`) is a Python CLI for syncing GPS track files to
-Garmin Connect. It rewrites the old uploader around a format-neutral core so the
-same application service can later be wrapped by a GUI.
+Garmin Connect Uploader (`gcu`) is a Python CLI and desktop GUI for syncing GPS
+track files to Garmin Connect. It rewrites the old uploader around a
+format-neutral core so the CLI and GUI share the same application services.
 
 ## Features
 
@@ -47,6 +47,31 @@ py -m pip install -r requirements.txt
 
 ## Usage
 
+Start the desktop GUI:
+
+```bash
+python gcu_gui.py
+```
+
+The GUI is a single-window workflow:
+
+- Login controls are at the top. On startup the GUI checks `.garth_session` in
+  the current directory. If the saved session is valid, file and cleanup actions
+  are enabled and the login button changes to Logout. If not, only login remains
+  enabled. Logging out removes `.garth_session`.
+- Files are managed in the middle table. Inspect runs local pre-check,
+  per-file metadata inspection, and dry-run planning; Run performs the actual
+  sync. The table can be sorted by clicking headers and defaults to sorting
+  inspected files by Start UTC.
+- Cleanup is at the bottom. Clean Uploaded Tracks first previews signed GCU
+  activities in the selected date range, shows them in a confirmation dialog,
+  and requires typing `DELETE` before deletion.
+- The bottom status log is shared by login, inspect, sync, and cleanup actions.
+
+The domain selector offers Global (`garmin.com`) and China (`garmin.cn`),
+defaulting to China for Simplified Chinese system locales and Global otherwise.
+The interface currently includes Simplified Chinese and English text.
+
 Inspect local tracks:
 
 ```bash
@@ -75,8 +100,12 @@ Authenticate and sync:
 
 ```bash
 python gcu_cli.py auth login --domain garmin.cn --session-dir garth_session
+python gcu_cli.py auth status --domain garmin.cn --session-dir garth_session --json
 python gcu_cli.py sync tracks/*.CSV --domain garmin.cn --session-dir garth_session
 ```
+
+`auth login` and `auth status` report the authenticated Garmin username when the
+profile API is available.
 
 Preview duplicate decisions without uploading:
 
@@ -122,6 +151,18 @@ importing a source file that is known to use a different timezone.
 Raw text files containing `$GPRMC` or `$GNRMC` sentences are supported. NMEA
 timestamps are UTC.
 
+## Activity Names
+
+Default uploaded activity names use the offline city estimate and a stable
+duplicate token:
+
+```text
+Nanjing Track Me [gcu:v1:...]
+```
+
+If no city can be resolved, the base name is `Track Me`. Use `--name-template`
+to override the default base name.
+
 ## Tests
 
 ```bash
@@ -137,6 +178,7 @@ gcu/duplicate  duplicate fingerprints and matching
 gcu/export     FIT writer
 gcu/formats    input format readers and display resolvers
 gcu/garmin     Garmin Connect client
+gcu/gui        desktop GUI
 tests          unit tests
 docs           design notes
 ```

@@ -9,7 +9,13 @@ from pathlib import Path
 from gcu.app.models import RemoteActivity
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
-from gcu.cli.output import print_decisions, print_local_tracks, print_precheck_report, print_purge_summary
+from gcu.cli.output import (
+    print_authenticated_user,
+    print_decisions,
+    print_local_tracks,
+    print_precheck_report,
+    print_purge_summary,
+)
 from gcu.duplicate.matcher import MatchOptions
 from gcu.export.fit_writer import write_fit
 from gcu.formats.base import FormatOptions
@@ -128,9 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub = auth_parser.add_subparsers(dest="auth_command", required=True)
     login_parser = auth_sub.add_parser("login", help="Log in and save Garmin session")
     add_garmin_args(login_parser)
+    login_parser.add_argument("--json", action="store_true", help="Emit JSON")
     login_parser.set_defaults(func=cmd_auth_login)
     status_parser = auth_sub.add_parser("status", help="Check whether Garmin session can be resumed")
     add_garmin_args(status_parser)
+    status_parser.add_argument("--json", action="store_true", help="Emit JSON")
     status_parser.set_defaults(func=cmd_auth_status)
 
     return parser
@@ -256,7 +264,12 @@ def cmd_purge(args) -> int:
 def cmd_auth_login(args) -> int:
     garmin = _garmin(args)
     garmin.ensure_session(args.username, args.password)
-    print(f"Garmin session saved in {garmin.session_dir}")
+    print_authenticated_user(
+        garmin.current_user(fallback_username=args.username),
+        domain=args.domain,
+        session_dir=garmin.session_dir,
+        as_json=args.json,
+    )
     return 0
 
 
@@ -264,7 +277,12 @@ def cmd_auth_status(args) -> int:
     garmin = _garmin(args)
     garmin.ensure_session(args.username, args.password)
     garmin.ping()
-    print(f"Garmin session is usable for {args.domain}")
+    print_authenticated_user(
+        garmin.current_user(fallback_username=args.username),
+        domain=args.domain,
+        session_dir=garmin.session_dir,
+        as_json=args.json,
+    )
     return 0
 
 
