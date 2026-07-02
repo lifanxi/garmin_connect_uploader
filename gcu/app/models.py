@@ -130,11 +130,19 @@ class PointRelationSummary:
 
 
 @dataclass(frozen=True)
+class FileCheckError:
+    source_path: Path
+    message: str
+
+
+@dataclass(frozen=True)
 class PrecheckReport:
     checked_count: int
     duplicate_groups: tuple[DuplicateTrackGroup, ...] = ()
     overlapping_points: tuple[PointRelationSummary, ...] = ()
     conflicting_points: tuple[PointRelationSummary, ...] = ()
+    file_errors: tuple[FileCheckError, ...] = ()
+    canceled: bool = False
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,7 @@ class UploadResult:
 @dataclass(frozen=True)
 class AuthenticatedUser:
     username: str
+    email: str = ""
     display_name: str = ""
     full_name: str = ""
     profile_id: int | None = None

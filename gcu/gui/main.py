@@ -54,6 +54,46 @@ class InspectBundle:
     tracks: list[LocalTrack]
 
 
+class ErrorDialog(QDialog):
+    def __init__(self, parent: QWidget, title: str, summary: str, details: str, tr) -> None:
+        super().__init__(parent)
+        self._tr = tr
+        self.setWindowTitle(title)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        summary_label = QLabel(summary)
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+
+        self.details_button = QPushButton(self._tr("error_details"))
+        self.details_button.setCheckable(True)
+        self.details_button.clicked.connect(self._toggle_details)
+        layout.addWidget(self.details_button, 0, Qt.AlignLeft)
+
+        self.details_output = QPlainTextEdit()
+        self.details_output.setReadOnly(True)
+        self.details_output.setPlainText(f"{self._tr('error_details_intro')}\n\n{details.strip()}")
+        self.details_output.setMinimumWidth(720)
+        self.details_output.setMinimumHeight(260)
+        self.details_output.setVisible(False)
+        layout.addWidget(self.details_output)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        self.resize(460, self.minimumSizeHint().height())
+
+    def _toggle_details(self, checked: bool) -> None:
+        self.details_output.setVisible(checked)
+        self.details_button.setText(self._tr("hide_error_details") if checked else self._tr("error_details"))
+        if checked:
+            self.resize(max(self.width(), 780), max(self.height(), 420))
+        else:
+            self.resize(460, self.minimumSizeHint().height())
+
+
 SESSION_DIR = Path(".garth_session")
 PURGE_CHUNK_DAYS = 366
 FILE_COLUMN = 0
@@ -91,6 +131,7 @@ TRANSLATIONS = {
         "remove": "Remove",
         "clear": "Clear",
         "inspect": "Inspect",
+        "stop_inspect": "Stop Inspect",
         "run": "Run",
         "file": "File",
         "format": "Format",
@@ -112,17 +153,22 @@ TRANSLATIONS = {
         "track_files_filter": "Track files (*.CSV *.csv *.txt *.nmea *.log);;All files (*)",
         "add_folder_title": "Add folder",
         "checking_files": "Checking files",
+        "stopping_check": "Stopping check",
+        "check_stopped": "Check stopped",
         "precheck_local": "Running local pre-check for {count} files",
+        "precheck_file": "Pre-checking file {index}/{count}: {name}",
         "precheck_ok": "Local pre-check passed",
         "precheck_issue_summary": "Local pre-check found duplicate, overlap, or conflict issues",
         "inspect_file": "Inspecting file {index}/{count}: {name}",
         "inspect_file_done": "Inspected file {index}/{count}: {name}",
         "connect_garmin": "Connecting to Garmin Connect",
-        "query_remote": "Querying remote activities and planning dry-run decisions",
-        "sync_file_queued": "Queued for upload decision {index}/{count}: {name}",
+        "query_remote": "Querying remote activities and planning tasks",
+        "query_remote_sync": "Querying remote activities and running sync tasks",
+        "sync_file_queued": "Queued for upload task {index}/{count}: {name}",
         "synchronizing": "Synchronizing tracks",
         "logging_in": "Logging in",
         "checking_session": "Checking session",
+        "no_valid_session": "No valid login session. Enter username and password to log in to Garmin Connect.",
         "previewing_purge": "Previewing purge",
         "deleting_signed": "Deleting signed activities",
         "confirm_purge": "Confirm purge",
@@ -132,22 +178,45 @@ TRANSLATIONS = {
         "login_complete": "Login complete.",
         "session_usable": "Session is usable.",
         "precheck_issues": "Pre-check found issues",
-        "continue_dry_run": "Continue to dry-run?",
+        "continue_dry_run": "Continue to task planning?",
         "inspect_stopped": "Inspect stopped after pre-check",
         "planning_sync": "Planning sync",
         "waiting_plan": "Waiting for sync plan",
-        "completed_decisions": "Completed {count} decisions",
+        "completed_plan_summary": "Completed plans for {count} tracks: upload {upload}, skip {skip}, backfill Token {backfill}, failed {failed}, other {other}",
+        "completed_task_summary": "Completed {count} track tasks: upload {upload}, skip {skip}, backfill Token {backfill}, failed {failed}, other {other}",
+        "plan_upload": "Upload",
+        "plan_skip": "Skip",
+        "plan_backfill_token": "Backfill Token",
+        "plan_upload_conflict": "Resolve upload conflict",
+        "plan_ambiguous": "Needs review",
+        "plan_failed": "Failed",
+        "sync_progress_planning": "Planning task: {name}",
+        "sync_progress_write_fit": "Rendering FIT: {name}",
+        "sync_progress_upload": "Uploading: {name}",
+        "sync_progress_wait_uploaded": "Waiting for Garmin activity after upload: {name} ({wait_s}s max)",
+        "sync_progress_update_name": "Updating activity name: {name}",
+        "sync_progress_backfill_token": "Backfilling Token: {name}",
+        "sync_progress_resolve_conflict": "Resolving upload conflict: {name}",
         "inspected_files": "Inspected {count} files",
         "no_files_title": "No files",
         "no_files": "Add one or more track files first.",
         "failed": "Failed",
         "error": "Error",
+        "error_details": "Details",
+        "hide_error_details": "Hide details",
+        "error_default_summary": "The operation failed. Please check your network connection and Garmin account status, then try again.",
+        "error_login_summary": "Login failed. Check the username, password, domain, and Garmin account status, then try again.",
+        "error_auth_summary": "Garmin rejected this request. Please log out, log in again, and retry.",
+        "error_network_summary": "Could not reach Garmin Connect. Check the network connection, then try again.",
+        "error_server_summary": "Garmin Connect returned an error. Please retry later, or log in again if the problem continues.",
+        "error_details_intro": "Technical details",
         "task_running": "Task running",
         "task_running_text": "Wait for the current task to finish before closing.",
         "checked_files": "Checked files",
         "duplicate_groups": "Duplicate groups",
         "overlapping_pairs": "Overlapping point pairs",
         "conflicting_pairs": "Conflicting point pairs",
+        "file_errors": "File errors",
         "duplicate_tracks": "Duplicate tracks",
         "overlapping_points": "Overlapping points",
         "conflicting_points": "Conflicting points",
@@ -183,6 +252,7 @@ TRANSLATIONS = {
         "remove": "移除",
         "clear": "清空",
         "inspect": "检查",
+        "stop_inspect": "中止检查",
         "run": "运行",
         "file": "文件",
         "format": "格式",
@@ -204,17 +274,22 @@ TRANSLATIONS = {
         "track_files_filter": "轨迹文件 (*.CSV *.csv *.txt *.nmea *.log);;所有文件 (*)",
         "add_folder_title": "添加文件夹",
         "checking_files": "正在检查文件",
+        "stopping_check": "正在中止检查",
+        "check_stopped": "检查已中止",
         "precheck_local": "正在对 {count} 个文件做本地合法性检查",
+        "precheck_file": "正在做本地合法性检查 {index}/{count}: {name}",
         "precheck_ok": "本地合法性检查通过",
         "precheck_issue_summary": "本地合法性检查发现重复、重叠或冲突问题",
         "inspect_file": "正在处理文件 {index}/{count}: {name}",
         "inspect_file_done": "文件处理完成 {index}/{count}: {name}",
         "connect_garmin": "正在连接 Garmin Connect",
-        "query_remote": "正在查询远端活动并生成 dry-run 决策",
-        "sync_file_queued": "等待同步决策 {index}/{count}: {name}",
+        "query_remote": "正在查询远端活动并生成任务计划",
+        "query_remote_sync": "正在查询远端活动并执行同步任务",
+        "sync_file_queued": "等待同步任务 {index}/{count}: {name}",
         "synchronizing": "正在同步轨迹",
         "logging_in": "正在登录",
         "checking_session": "正在检查登录",
+        "no_valid_session": "无有效登录凭证，请输入用户名密码登录 Garmin Connect",
         "previewing_purge": "正在预览清理",
         "deleting_signed": "正在删除签名活动",
         "confirm_purge": "确认清理",
@@ -224,22 +299,45 @@ TRANSLATIONS = {
         "login_complete": "登录完成。",
         "session_usable": "登录凭证可用。",
         "precheck_issues": "预检查发现问题",
-        "continue_dry_run": "是否继续执行 dry-run？",
+        "continue_dry_run": "是否继续生成任务计划？",
         "inspect_stopped": "预检查后已停止检查",
         "planning_sync": "正在生成同步计划",
-        "waiting_plan": "等待同步计划",
-        "completed_decisions": "完成 {count} 个决策",
+        "waiting_plan": "等待任务计划",
+        "completed_plan_summary": "已完成 {count} 个轨迹任务计划，其中上传 {upload} 条，跳过 {skip} 条，补填Token {backfill} 条，失败 {failed} 条，其它 {other} 条",
+        "completed_task_summary": "已完成 {count} 个轨迹任务，其中上传 {upload} 条，跳过 {skip} 条，补填Token {backfill} 条，失败 {failed} 条，其它 {other} 条",
+        "plan_upload": "上传",
+        "plan_skip": "跳过",
+        "plan_backfill_token": "补填Token",
+        "plan_upload_conflict": "处理上传冲突",
+        "plan_ambiguous": "需人工确认",
+        "plan_failed": "失败",
+        "sync_progress_planning": "正在判断处理方式: {name}",
+        "sync_progress_write_fit": "正在生成 FIT: {name}",
+        "sync_progress_upload": "正在上传: {name}",
+        "sync_progress_wait_uploaded": "正在等待 Garmin 生成活动: {name}（最多 {wait_s} 秒）",
+        "sync_progress_update_name": "正在更新活动名称: {name}",
+        "sync_progress_backfill_token": "正在补填Token: {name}",
+        "sync_progress_resolve_conflict": "正在处理上传冲突: {name}",
         "inspected_files": "已检查 {count} 个文件",
         "no_files_title": "没有文件",
         "no_files": "请先添加一个或多个轨迹文件。",
         "failed": "失败",
         "error": "错误",
+        "error_details": "详细日志",
+        "hide_error_details": "收起日志",
+        "error_default_summary": "操作失败。请检查网络连接和 Garmin 账号状态后重试。",
+        "error_login_summary": "登录失败。请检查用户名、密码、站点和 Garmin 账号状态后重试。",
+        "error_auth_summary": "Garmin 拒绝了本次请求。请退出登录后重新登录，再重试。",
+        "error_network_summary": "无法连接 Garmin Connect。请检查网络连接后重试。",
+        "error_server_summary": "Garmin Connect 返回了错误。请稍后重试；如果持续失败，请重新登录。",
+        "error_details_intro": "技术细节",
         "task_running": "任务运行中",
         "task_running_text": "请等待当前任务结束后再关闭。",
         "checked_files": "已检查文件数",
         "duplicate_groups": "重复轨迹组",
         "overlapping_pairs": "重叠点文件对",
         "conflicting_pairs": "冲突点文件对",
+        "file_errors": "文件解析错误",
         "duplicate_tracks": "重复轨迹",
         "overlapping_points": "重叠点",
         "conflicting_points": "冲突点",
@@ -275,6 +373,8 @@ class MainWindow(QMainWindow):
         self._workers: list[TaskWorker] = []
         self._authenticated = False
         self._sort_after_sync_done = False
+        self._inspect_task_running = False
+        self._inspect_cancel_requested = False
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -339,6 +439,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.login_button)
 
         self.login_button.clicked.connect(self._login_or_logout)
+        self.password_input.returnPressed.connect(self._login_from_password_return)
         return page
 
     def _build_files_page(self) -> QWidget:
@@ -493,11 +594,20 @@ class MainWindow(QMainWindow):
         self.files_table.setSortingEnabled(sorting_enabled)
 
     def _inspect_files(self) -> None:
+        if self._inspect_task_running:
+            self._inspect_cancel_requested = True
+            self.inspect_button.setEnabled(False)
+            self.statusBar().showMessage(self.tr("stopping_check"))
+            self._append_status_log(self.tr("stopping_check"))
+            return
         if not self._require_files():
             return
+        self._inspect_task_running = True
+        self._inspect_cancel_requested = False
         options = self._sync_options(dry_run=True)
         files = list(self.files)
         precheck_local = self.tr("precheck_local", count=len(files))
+        precheck_file = self.tr("precheck_file")
         precheck_ok = self.tr("precheck_ok")
         precheck_issue_summary = self.tr("precheck_issue_summary")
         self._run_task(
@@ -506,11 +616,13 @@ class MainWindow(QMainWindow):
                 files,
                 options,
                 precheck_local,
+                precheck_file,
                 precheck_ok,
                 precheck_issue_summary,
                 emit,
             ),
-            lambda report: self._on_precheck_done(report, files, options),
+            lambda bundle: self._on_precheck_done(bundle, options),
+            on_error=lambda message: self._on_inspect_error(message),
             on_progress=self._on_progress_event,
             pass_progress=True,
         )
@@ -524,9 +636,8 @@ class MainWindow(QMainWindow):
         files = list(self.files)
         queued_template = self.tr("sync_file_queued")
         connect_garmin = self.tr("connect_garmin")
-        query_remote = self.tr("query_remote")
+        query_remote = self.tr("query_remote_sync")
         inspect_file = self.tr("inspect_file")
-        inspect_file_done = self.tr("inspect_file_done")
         self._run_task(
             self.tr("synchronizing"),
             lambda emit: self._sync_task(
@@ -537,7 +648,6 @@ class MainWindow(QMainWindow):
                 connect_garmin,
                 query_remote,
                 inspect_file,
-                inspect_file_done,
                 emit,
             ),
             self._on_sync_done,
@@ -550,6 +660,11 @@ class MainWindow(QMainWindow):
             self._logout()
             return
         self._login()
+
+    def _login_from_password_return(self) -> None:
+        if self._authenticated or self._active_tasks or not self.password_input.text():
+            return
+        self.login_button.click()
 
     def _login(self) -> None:
         settings = self._garmin_settings()
@@ -656,15 +771,16 @@ class MainWindow(QMainWindow):
 
     def _on_login_ok(self, user: AuthenticatedUser, message: str) -> None:
         self._authenticated = True
-        if user.username:
-            self.username_input.setText(user.username)
+        login_name = user.email or user.username
+        if login_name:
+            self.username_input.setText(login_name)
         self._refresh_action_state()
         self._append_login_log(message)
 
     def _on_login_failed(self, message: str) -> None:
         self._authenticated = False
         self._refresh_action_state()
-        self._show_error(message)
+        self._show_error(message, context="login")
 
     def _status_task(self, settings: GarminSettings) -> AuthenticatedUser:
         garmin = self._garmin_authenticated(settings)
@@ -691,19 +807,36 @@ class MainWindow(QMainWindow):
         files: list[Path],
         options: SyncOptions,
         precheck_local: str,
+        precheck_file: str,
         precheck_ok: str,
         precheck_issue_summary: str,
         emit,
-    ) -> PrecheckReport:
+    ) -> InspectBundle:
         emit(("log", precheck_local))
-        report = PrecheckService().check(files, options)
+        tracks: list[LocalTrack] = []
+        report = PrecheckService().check(
+            files,
+            options,
+            on_file=lambda index, count, path: emit(
+                ("log", precheck_file.format(index=index, count=count, name=path.name))
+            ),
+            on_track=lambda local_track: (tracks.append(local_track), emit(("track", local_track))),
+            should_cancel=lambda: self._inspect_cancel_requested,
+        )
+        if report.canceled:
+            emit(("log", self.tr("check_stopped")))
+            return InspectBundle(report=report, tracks=tracks)
         if _precheck_has_issues(report):
             emit(("log", precheck_issue_summary))
         else:
             emit(("log", precheck_ok))
-        return report
+        return InspectBundle(report=report, tracks=tracks)
 
-    def _on_precheck_done(self, report: PrecheckReport, files: list[Path], options: SyncOptions) -> None:
+    def _on_precheck_done(self, bundle: InspectBundle, options: SyncOptions) -> None:
+        report = bundle.report
+        if report.canceled:
+            self._on_inspect_canceled()
+            return
         if _precheck_has_issues(report):
             self._append_status_log(_format_precheck(report, self.tr))
             answer = QMessageBox.warning(
@@ -716,61 +849,71 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 self.statusBar().showMessage(self.tr("inspect_stopped"))
                 self._append_status_log(self.tr("inspect_stopped"))
+                self._inspect_task_running = False
+                self._inspect_cancel_requested = False
+                self._refresh_action_state()
                 return
-        self._inspect_and_plan(files, options)
+        failed_files = {item.source_path for item in report.file_errors}
+        tracks = [track for track in bundle.tracks if track.track_file.source_path not in failed_files]
+        self._inspect_and_plan(tracks, options)
 
-    def _inspect_and_plan(self, files: list[Path], options: SyncOptions) -> None:
+    def _inspect_and_plan(self, tracks: list[LocalTrack], options: SyncOptions) -> None:
         settings = self._garmin_settings()
         self._sort_after_sync_done = True
         waiting_plan = self.tr("waiting_plan")
-        inspect_file = self.tr("inspect_file")
-        inspect_file_done = self.tr("inspect_file_done")
         connect_garmin = self.tr("connect_garmin")
         query_remote = self.tr("query_remote")
         self._run_task(
             self.tr("planning_sync"),
             lambda emit: self._inspect_and_plan_task(
-                files,
+                tracks,
                 settings,
                 options,
                 waiting_plan,
-                inspect_file,
-                inspect_file_done,
                 connect_garmin,
                 query_remote,
                 emit,
             ),
-            self._on_sync_done,
+            self._on_inspect_plan_done,
+            on_error=lambda message: self._on_inspect_error(message),
             on_progress=self._on_progress_event,
             pass_progress=True,
         )
 
     def _inspect_and_plan_task(
         self,
-        files: list[Path],
+        tracks: list[LocalTrack],
         settings: GarminSettings,
         options: SyncOptions,
         waiting_plan: str,
-        inspect_file: str,
-        inspect_file_done: str,
         connect_garmin: str,
         query_remote: str,
         emit,
     ) -> list[SyncDecision]:
         service = SyncService()
-        tracks: list[LocalTrack] = []
-        count = len(files)
-        for index, path in enumerate(files, start=1):
-            emit(("log", inspect_file.format(index=index, count=count, name=path.name)))
-            local_track = service.inspect([path], options)[0]
-            tracks.append(local_track)
-            emit(("track", local_track))
-            emit(("status", (path, waiting_plan, "")))
-            emit(("log", inspect_file_done.format(index=index, count=count, name=path.name)))
+        if not tracks:
+            return []
+        for local_track in tracks:
+            if self._inspect_cancel_requested:
+                emit(("log", self.tr("check_stopped")))
+                return []
+            emit(("status", (local_track.track_file.source_path, waiting_plan, "")))
+        if self._inspect_cancel_requested:
+            emit(("log", self.tr("check_stopped")))
+            return []
         emit(("log", connect_garmin))
         garmin = self._garmin_authenticated(settings)
+        if self._inspect_cancel_requested:
+            emit(("log", self.tr("check_stopped")))
+            return []
         emit(("log", query_remote))
-        return service.sync_tracks(tracks, garmin, options, on_decision=lambda decision: emit(("decision", decision)))
+        return service.sync_tracks(
+            tracks,
+            garmin,
+            options,
+            on_decision=lambda decision: emit(("decision", decision)),
+            on_progress=lambda event, track, details: emit(("sync-progress", (event, track, details))),
+        )
 
     def _sync_task(
         self,
@@ -781,31 +924,77 @@ class MainWindow(QMainWindow):
         connect_garmin: str,
         query_remote: str,
         inspect_file: str,
-        inspect_file_done: str,
         emit,
     ) -> list[SyncDecision]:
         service = SyncService()
         count = len(files)
         tracks: list[LocalTrack] = []
+        failed_decisions: list[SyncDecision] = []
         for index, path in enumerate(files, start=1):
             emit(("log", inspect_file.format(index=index, count=count, name=path.name)))
-            local_track = service.inspect([path], options)[0]
+            try:
+                local_track = service.inspect([path], options)[0]
+            except Exception as exc:
+                decision = SyncDecision(
+                    source_path=path,
+                    status="failed",
+                    token="",
+                    planned_name="",
+                    message=_format_file_exception(exc),
+                )
+                failed_decisions.append(decision)
+                emit(("decision", decision))
+                continue
             tracks.append(local_track)
             emit(("track", local_track))
             emit(("log", queued_template.format(index=index, count=count, name=path.name)))
-            emit(("log", inspect_file_done.format(index=index, count=count, name=path.name)))
+        if not tracks:
+            return failed_decisions
         emit(("log", connect_garmin))
         garmin = self._garmin_authenticated(settings)
         emit(("log", query_remote))
-        return service.sync_tracks(tracks, garmin, options, on_decision=lambda decision: emit(("decision", decision)))
+        decisions = service.sync_tracks(
+            tracks,
+            garmin,
+            options,
+            on_decision=lambda decision: emit(("decision", decision)),
+            on_progress=lambda event, track, details: emit(("sync-progress", (event, track, details))),
+        )
+        return failed_decisions + decisions
 
     def _on_sync_done(self, decisions: list[SyncDecision]) -> None:
-        message = self.tr("completed_decisions", count=len(decisions))
+        message = _format_decision_summary(decisions, self.tr, plan=False)
         self.statusBar().showMessage(message)
         self._append_status_log(message)
         if getattr(self, "_sort_after_sync_done", False):
             self.files_table.sortItems(START_UTC_COLUMN, Qt.AscendingOrder)
             self._sort_after_sync_done = False
+
+    def _on_inspect_plan_done(self, decisions: list[SyncDecision]) -> None:
+        if self._inspect_cancel_requested:
+            self._on_inspect_canceled()
+            return
+        self._inspect_task_running = False
+        self._inspect_cancel_requested = False
+        message = _format_decision_summary(decisions, self.tr, plan=True)
+        self.statusBar().showMessage(message)
+        self._append_status_log(message)
+        if getattr(self, "_sort_after_sync_done", False):
+            self.files_table.sortItems(START_UTC_COLUMN, Qt.AscendingOrder)
+            self._sort_after_sync_done = False
+        self._refresh_action_state()
+
+    def _on_inspect_canceled(self) -> None:
+        self._inspect_task_running = False
+        self._inspect_cancel_requested = False
+        self.statusBar().showMessage(self.tr("check_stopped"))
+        self._refresh_action_state()
+
+    def _on_inspect_error(self, message: str) -> None:
+        self._inspect_task_running = False
+        self._inspect_cancel_requested = False
+        self._refresh_action_state()
+        self._show_error(message)
 
     def _on_progress_event(self, event) -> None:
         kind, payload = event
@@ -814,7 +1003,11 @@ class MainWindow(QMainWindow):
             self._remember_track(payload)
         elif kind == "decision":
             self._update_decision_row(payload)
-            self._append_status_log(_format_decision_log(payload))
+        elif kind == "sync-progress":
+            event, track, details = payload
+            message = _format_sync_progress(event, track, details, self.tr)
+            self._append_status_log(message)
+            self._update_status_row(track.track_file.source_path, message, "")
         elif kind == "status":
             path, plan, message = payload
             self._update_status_row(path, plan, message)
@@ -861,7 +1054,7 @@ class MainWindow(QMainWindow):
             return
         sorting_enabled = self.files_table.isSortingEnabled()
         self.files_table.setSortingEnabled(False)
-        self._set_table_values(self.files_table, row, PLAN_COLUMN, [decision.status])
+        self._set_table_values(self.files_table, row, PLAN_COLUMN, [_localized_plan_status(decision.status, self.tr)])
         self._set_table_values(self.files_table, row, NAME_COLUMN, [decision.planned_name])
         self._set_table_values(self.files_table, row, MESSAGE_COLUMN, [decision.message])
         self._set_table_values(self.files_table, row, ACTIVITY_COLUMN, [str(decision.activity_id or "")])
@@ -918,10 +1111,11 @@ class MainWindow(QMainWindow):
             self.status.setValue(1)
             self._refresh_action_state()
 
-    def _show_error(self, message: str) -> None:
+    def _show_error(self, message: str, context: str = "default") -> None:
         self.statusBar().showMessage(self.tr("failed"))
         self._append_status_log(message)
-        QMessageBox.critical(self, self.tr("error"), message)
+        summary = _friendly_error_message(message, self.tr, context=context)
+        ErrorDialog(self, self.tr("error"), summary, message, self.tr).exec()
 
     def _refresh_action_state(self) -> None:
         task_running = self._active_tasks > 0
@@ -934,11 +1128,21 @@ class MainWindow(QMainWindow):
         self.login_button.setText(self.tr("logout") if self._authenticated else self.tr("login"))
 
         authenticated_idle = self._authenticated and not task_running
+        self.purge_page.setEnabled(authenticated_idle)
+
+        self.files_page.setEnabled(self._authenticated)
+        self.files_table.setEnabled(self._authenticated)
+        file_controls_enabled = authenticated_idle
         for widget in (
-            self.files_page,
-            self.purge_page,
+            self.add_files_button,
+            self.add_folder_button,
+            self.remove_files_button,
+            self.clear_files_button,
+            self.run_button,
         ):
-            widget.setEnabled(authenticated_idle)
+            widget.setEnabled(file_controls_enabled)
+        self.inspect_button.setEnabled(authenticated_idle or self._inspect_task_running)
+        self.inspect_button.setText(self.tr("stop_inspect") if self._inspect_task_running else self.tr("inspect"))
 
     def _resize_to_initial_size(self) -> None:
         central = self.centralWidget()
@@ -1009,7 +1213,7 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() ^ Qt.ItemIsEditable)
             if source_path is not None and column == FILE_COLUMN:
                 item.setData(Qt.UserRole, str(source_path))
-                item.setToolTip(str(source_path))
+                item.setToolTip(str(source_path.resolve()))
             table.setItem(row, column, item)
         table.setSortingEnabled(sorting_enabled)
 
@@ -1036,11 +1240,13 @@ class MainWindow(QMainWindow):
     def _on_auto_session_failed(self, message: str) -> None:
         self._authenticated = False
         self._refresh_action_state()
-        self._append_login_log(message)
+        friendly_message = self.tr("no_valid_session")
+        self.statusBar().showMessage(friendly_message)
+        self._append_login_log(friendly_message)
 
 
 def _precheck_has_issues(report: PrecheckReport) -> bool:
-    return bool(report.duplicate_groups or report.overlapping_points or report.conflicting_points)
+    return bool(report.duplicate_groups or report.overlapping_points or report.conflicting_points or report.file_errors)
 
 
 def _format_utc_millis(value) -> str:
@@ -1069,13 +1275,67 @@ def _format_duration_adaptive(duration_s: float | None) -> str:
     return f"{hours}h"
 
 
-def _format_decision_log(decision: SyncDecision) -> str:
-    details = [decision.source_path.name, decision.status]
-    if decision.activity_id is not None:
-        details.append(f"activity={decision.activity_id}")
-    if decision.message:
-        details.append(decision.message)
-    return " | ".join(details)
+def _localized_plan_status(status: str, tr) -> str:
+    if status == "upload":
+        return tr("plan_upload")
+    if status in {"skip-token"}:
+        return tr("plan_skip")
+    if status in {"skip-legacy-match", "backfilled-token"}:
+        return tr("plan_backfill_token")
+    if status == "upload-conflict":
+        return tr("plan_upload_conflict")
+    if status == "ambiguous":
+        return tr("plan_ambiguous")
+    if status == "failed":
+        return tr("plan_failed")
+    return status
+
+
+def _format_sync_progress(event: str, track: LocalTrack, details: dict, tr) -> str:
+    key_by_event = {
+        "planning": "sync_progress_planning",
+        "write-fit": "sync_progress_write_fit",
+        "upload": "sync_progress_upload",
+        "wait-uploaded": "sync_progress_wait_uploaded",
+        "update-name": "sync_progress_update_name",
+        "backfill-token": "sync_progress_backfill_token",
+        "resolve-conflict": "sync_progress_resolve_conflict",
+    }
+    key = key_by_event.get(event)
+    name = track.track_file.source_path.name
+    if key is None:
+        return f"{event}: {name}"
+    return tr(key, name=name, wait_s=details.get("wait_s", ""))
+
+
+def _format_decision_summary(decisions: list[SyncDecision], tr, plan: bool) -> str:
+    counts = _decision_counts(decisions)
+    key = "completed_plan_summary" if plan else "completed_task_summary"
+    return tr(
+        key,
+        count=len(decisions),
+        upload=counts["upload"],
+        skip=counts["skip"],
+        backfill=counts["backfill"],
+        failed=counts["failed"],
+        other=counts["other"],
+    )
+
+
+def _decision_counts(decisions: list[SyncDecision]) -> dict[str, int]:
+    counts = {"upload": 0, "skip": 0, "backfill": 0, "failed": 0, "other": 0}
+    for decision in decisions:
+        if decision.status == "upload":
+            counts["upload"] += 1
+        elif decision.status == "skip-token":
+            counts["skip"] += 1
+        elif decision.status in {"skip-legacy-match", "backfilled-token"}:
+            counts["backfill"] += 1
+        elif decision.status == "failed":
+            counts["failed"] += 1
+        else:
+            counts["other"] += 1
+    return counts
 
 
 def _timestamped_log_lines(message: str) -> list[str]:
@@ -1084,6 +1344,35 @@ def _timestamped_log_lines(message: str) -> list[str]:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = message.splitlines() or [message]
     return [f"[{timestamp}] {line}" if line else f"[{timestamp}]" for line in lines]
+
+
+def _friendly_error_message(message: str, tr, context: str = "default") -> str:
+    lowered = message.lower()
+    last_line = _last_traceback_line(message)
+    detail = f"\n\n{last_line}" if last_line else ""
+
+    if context == "login":
+        return tr("error_login_summary") + detail
+    if any(text in lowered for text in ("unauthorized", "forbidden", "401", "403", "invalid token", "token expired")):
+        return tr("error_auth_summary") + detail
+    if any(text in lowered for text in ("connectionerror", "timeout", "timed out", "name resolution", "proxyerror", "sslerror")):
+        return tr("error_network_summary") + detail
+    if any(text in lowered for text in ("garthhttperror", "http error", "status_code", "500", "502", "503", "504")):
+        return tr("error_server_summary") + detail
+    return tr("error_default_summary") + detail
+
+
+def _last_traceback_line(message: str) -> str:
+    for line in reversed(message.splitlines()):
+        text = line.strip()
+        if text:
+            return text
+    return ""
+
+
+def _format_file_exception(exc: Exception) -> str:
+    message = str(exc).strip()
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 def _text_column_width(widget: QWidget, sample: str) -> int:
@@ -1096,8 +1385,14 @@ def _format_precheck(report: PrecheckReport, tr) -> str:
         f"{tr('duplicate_groups')}: {len(report.duplicate_groups)}",
         f"{tr('overlapping_pairs')}: {len(report.overlapping_points)}",
         f"{tr('conflicting_pairs')}: {len(report.conflicting_points)}",
+        f"{tr('file_errors')}: {len(report.file_errors)}",
         "",
     ]
+    if report.file_errors:
+        lines.append(tr("file_errors"))
+        for item in report.file_errors:
+            lines.append(f"  {item.source_path}: {item.message}")
+        lines.append("")
     if report.duplicate_groups:
         lines.append(tr("duplicate_tracks"))
         for group in report.duplicate_groups:

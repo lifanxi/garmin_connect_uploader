@@ -1,0 +1,32 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Installer version
+        required: false
+        default: 0.1.0
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Inno Setup
+        run: winget install --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements
+
+      - name: Build installer
+        shell: pwsh
+        run: .\scripts\build_windows_installer.ps1 -Version "${{ github.event.inputs.version }}"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: GarminConnectUploader-Windows-Installer
+          path: dist/installer/*.exe

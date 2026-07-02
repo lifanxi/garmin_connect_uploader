@@ -92,12 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Extra wait seconds per 1000 track points for post-upload lookup",
     )
-    sync_parser.add_argument(
-        "--post-upload-tag-workers",
-        type=int,
-        default=4,
-        help="Background workers for locating and tagging uploaded activities",
-    )
     sync_parser.set_defaults(func=cmd_sync)
 
     backfill_parser = subparsers.add_parser("backfill", help="Add duplicate tokens to existing Garmin activities")
@@ -308,7 +302,6 @@ def _sync_options(args, dry_run: bool) -> SyncOptions:
         post_upload_wait_base_s=getattr(args, "post_upload_wait_base_s", 30),
         post_upload_wait_per_1000_points_s=getattr(args, "post_upload_wait_per_1000_points_s", 5),
         post_upload_max_wait_s=getattr(args, "post_upload_max_wait_s", 180),
-        post_upload_tag_workers=getattr(args, "post_upload_tag_workers", 4),
     )
 
 

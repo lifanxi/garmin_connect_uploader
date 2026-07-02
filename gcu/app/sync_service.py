@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, timedelta
 from math import ceil
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from gcu.app.models import LocalTrack, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision
 from gcu.app.naming import planned_activity_name
@@ -34,6 +33,9 @@ class GarminGateway(Protocol):
         ...
 
 
+ProgressCallback = Callable[[str, LocalTrack, dict[str, Any]], None]
+
+
 @dataclass(frozen=True)
 class SyncOptions:
     format_options: FormatOptions
@@ -45,7 +47,6 @@ class SyncOptions:
     post_upload_wait_base_s: int = 30
     post_upload_wait_per_1000_points_s: int = 5
     post_upload_max_wait_s: int = 180
-    post_upload_tag_workers: int = 4
 
 
 class SyncService:
@@ -75,9 +76,10 @@ class SyncService:
         garmin: GarminGateway,
         options: SyncOptions,
         on_decision: Callable[[SyncDecision], None] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> list[SyncDecision]:
         local_tracks = self.inspect(files, options)
-        return self.sync_tracks(local_tracks, garmin, options, on_decision)
+        return self.sync_tracks(local_tracks, garmin, options, on_decision, on_progress)
 
     def sync_tracks(
         self,
@@ -85,6 +87,7 @@ class SyncService:
         garmin: GarminGateway,
         options: SyncOptions,
         on_decision: Callable[[SyncDecision], None] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> list[SyncDecision]:
         if not local_tracks:
             return []
@@ -92,122 +95,57 @@ class SyncService:
         start_date, end_date = self._query_window(local_tracks)
         index = RemoteActivityIndex.build(garmin.list_activities(start_date, end_date))
         decisions: list[SyncDecision] = []
-        pending_tagging: dict[Future[SyncDecision], Path | None] = {}
         processed_tokens: dict[str, int | None] = {}
 
-        worker_count = max(1, options.post_upload_tag_workers)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            for local_track in local_tracks:
-                if local_track.token in processed_tokens:
-                    self._append_decision(
-                        decisions,
-                        SyncDecision(
-                            source_path=local_track.track_file.source_path,
-                            status="skip-token",
-                            token=local_track.token,
-                            planned_name=local_track.planned_name,
-                            activity_id=processed_tokens[local_track.token],
-                            message="duplicate local track in same batch",
-                        ),
-                        on_decision,
-                    )
-                    continue
+        for local_track in local_tracks:
+            self._emit_progress(on_progress, "planning", local_track)
+            if local_track.token in processed_tokens:
+                self._append_decision(
+                    decisions,
+                    SyncDecision(
+                        source_path=local_track.track_file.source_path,
+                        status="skip-token",
+                        token=local_track.token,
+                        planned_name=local_track.planned_name,
+                        activity_id=processed_tokens[local_track.token],
+                        message="duplicate local track in same batch",
+                    ),
+                    on_decision,
+                )
+                continue
 
-                decision = self._decide(local_track, index, options)
-                if decision.status == "skip-legacy-match" and not options.dry_run and decision.activity_id is not None:
-                    match = self._single_candidate(decision)
-                    if match is not None and not is_gcu_activity(match):
-                        self._append_decision(decisions, self._signature_rejected_decision(local_track, match), on_decision)
-                        continue
+            decision = self._decide(local_track, index, options)
+            if decision.status == "skip-legacy-match" and not options.dry_run and decision.activity_id is not None:
+                try:
+                    self._emit_progress(on_progress, "backfill-token", local_track, activity_id=decision.activity_id)
                     garmin.update_activity_name(decision.activity_id, decision.planned_name)
+                except Exception as exc:
+                    self._append_decision(decisions, self._failed_decision(local_track, exc), on_decision)
+                    continue
+                processed_tokens[local_track.token] = decision.activity_id
+                self._append_decision(
+                    decisions,
+                    SyncDecision(
+                        source_path=decision.source_path,
+                        status="backfilled-token",
+                        token=decision.token,
+                        planned_name=decision.planned_name,
+                        activity_id=decision.activity_id,
+                        message="token added to existing activity",
+                    ),
+                    on_decision,
+                )
+                continue
+            if decision.status != "upload" or options.dry_run:
+                if decision.status in {"skip-token", "skip-legacy-match"}:
                     processed_tokens[local_track.token] = decision.activity_id
-                    self._append_decision(
-                        decisions,
-                        SyncDecision(
-                            source_path=decision.source_path,
-                            status="backfilled-token",
-                            token=decision.token,
-                            planned_name=decision.planned_name,
-                            activity_id=decision.activity_id,
-                            message="token added to existing activity",
-                        ),
-                        on_decision,
-                    )
-                    continue
-                if decision.status != "upload" or options.dry_run:
-                    if decision.status in {"skip-token", "skip-legacy-match"}:
-                        processed_tokens[local_track.token] = decision.activity_id
-                    self._append_decision(decisions, decision, on_decision)
-                    continue
+                self._append_decision(decisions, decision, on_decision)
+                continue
 
-                fit_path = self._fit_path(local_track, options)
-                write_fit(local_track.track_file.track, fit_path, activity_name=local_track.planned_name)
-                try:
-                    upload_result = garmin.upload_activity(fit_path)
-                except DuplicateUploadError:
-                    conflict_decision = self._resolve_upload_conflict(local_track, garmin, options)
-                    if conflict_decision.activity_id is not None and conflict_decision.status == "upload-conflict":
-                        processed_tokens[local_track.token] = conflict_decision.activity_id
-                    self._append_decision(decisions, conflict_decision, on_decision)
-                    self._cleanup_fit(fit_path, options)
-                    continue
-
-                activity_id = getattr(upload_result, "activity_id", None)
-                if activity_id is not None:
-                    wait_s = self._estimated_post_upload_wait_s(local_track, options)
-                    uploaded_activity = self._wait_for_uploaded_activity(local_track, garmin, wait_s, activity_id)
-                    if uploaded_activity is None:
-                        self._append_decision(
-                            decisions,
-                            SyncDecision(
-                                source_path=local_track.track_file.source_path,
-                                status="upload",
-                                token=local_track.token,
-                                planned_name=local_track.planned_name,
-                                activity_id=activity_id,
-                                message=f"uploaded; activity signature unavailable after {wait_s}s, not tagged",
-                            ),
-                            on_decision,
-                        )
-                        processed_tokens[local_track.token] = activity_id
-                        self._cleanup_fit(fit_path, options)
-                        continue
-                    if not is_gcu_activity(uploaded_activity):
-                        self._append_decision(
-                            decisions,
-                            self._signature_rejected_decision(local_track, uploaded_activity),
-                            on_decision,
-                        )
-                        self._cleanup_fit(fit_path, options)
-                        continue
-                    garmin.update_activity_name(activity_id, local_track.planned_name)
-                    processed_tokens[local_track.token] = activity_id
-                    self._append_decision(
-                        decisions,
-                        SyncDecision(
-                            source_path=local_track.track_file.source_path,
-                            status="upload",
-                            token=local_track.token,
-                            planned_name=local_track.planned_name,
-                            activity_id=activity_id,
-                            message="uploaded",
-                        ),
-                        on_decision,
-                    )
-                    self._cleanup_fit(fit_path, options)
-                    continue
-
-                processed_tokens[local_track.token] = None
-                future = executor.submit(self._tag_after_upload, local_track, garmin, options)
-                pending_tagging[future] = fit_path
-
-            for future in as_completed(pending_tagging):
-                fit_path = pending_tagging[future]
-                try:
-                    self._append_decision(decisions, future.result(), on_decision)
-                finally:
-                    if fit_path is not None:
-                        self._cleanup_fit(fit_path, options)
+            decision = self._upload_and_tag_serial(local_track, garmin, options, on_progress)
+            if decision.status in {"upload", "upload-conflict"}:
+                processed_tokens[local_track.token] = decision.activity_id
+            self._append_decision(decisions, decision, on_decision)
 
         return decisions
 
@@ -221,36 +159,85 @@ class SyncService:
         if on_decision is not None:
             on_decision(decision)
 
-    def _tag_after_upload(
+    def _emit_progress(
+        self,
+        on_progress: ProgressCallback | None,
+        event: str,
+        local_track: LocalTrack,
+        **details: Any,
+    ) -> None:
+        if on_progress is not None:
+            on_progress(event, local_track, details)
+
+    def _upload_and_tag_serial(
         self,
         local_track: LocalTrack,
         garmin: GarminGateway,
         options: SyncOptions,
+        on_progress: ProgressCallback | None,
     ) -> SyncDecision:
-        wait_s = self._estimated_post_upload_wait_s(local_track, options)
-        located = self._locate_uploaded_activity(local_track, garmin, wait_s)
-        activity_id = located.activity_id if located else None
-        if activity_id is not None:
-            if located is not None and not is_gcu_activity(located):
-                return self._signature_rejected_decision(local_track, located)
-            garmin.update_activity_name(activity_id, local_track.planned_name)
-        return (
-            SyncDecision(
+        fit_path = self._fit_path(local_track, options)
+        try:
+            try:
+                self._emit_progress(on_progress, "write-fit", local_track)
+                write_fit(local_track.track_file.track, fit_path, activity_name=local_track.planned_name)
+                self._emit_progress(on_progress, "upload", local_track)
+                upload_result = garmin.upload_activity(fit_path)
+            except DuplicateUploadError:
+                try:
+                    self._emit_progress(on_progress, "resolve-conflict", local_track)
+                    return self._resolve_upload_conflict(local_track, garmin, options)
+                except Exception as exc:
+                    return self._failed_decision(local_track, exc)
+            except Exception as exc:
+                return self._failed_decision(local_track, exc)
+
+            activity_id = getattr(upload_result, "activity_id", None)
+            wait_s = self._estimated_post_upload_wait_s(local_track, options)
+            try:
+                self._emit_progress(on_progress, "wait-uploaded", local_track, activity_id=activity_id, wait_s=wait_s)
+                uploaded_activity = self._wait_for_uploaded_activity(local_track, garmin, wait_s, activity_id)
+            except Exception as exc:
+                return self._failed_decision(local_track, exc, activity_id)
+
+            if uploaded_activity is None:
+                return SyncDecision(
+                    source_path=local_track.track_file.source_path,
+                    status="failed",
+                    token=local_track.token,
+                    planned_name=local_track.planned_name,
+                    activity_id=activity_id,
+                    message=f"uploaded; activity unavailable after {wait_s}s, not tagged",
+                )
+            if not is_gcu_activity(uploaded_activity):
+                return self._signature_rejected_decision(local_track, uploaded_activity)
+
+            activity_id = uploaded_activity.activity_id
+            try:
+                self._emit_progress(on_progress, "update-name", local_track, activity_id=activity_id)
+                garmin.update_activity_name(activity_id, local_track.planned_name)
+            except Exception as exc:
+                return self._failed_decision(local_track, exc, activity_id)
+            return SyncDecision(
                 source_path=local_track.track_file.source_path,
                 status="upload",
                 token=local_track.token,
                 planned_name=local_track.planned_name,
                 activity_id=activity_id,
-                message=f"uploaded; token tagged after waiting up to {wait_s}s",
+                message="uploaded and tagged",
             )
-            if activity_id is not None
-            else SyncDecision(
-                source_path=local_track.track_file.source_path,
-                status="upload",
-                token=local_track.token,
-                planned_name=local_track.planned_name,
-                message=f"uploaded; activity id unavailable for tagging after {wait_s}s",
-            )
+        finally:
+            self._cleanup_fit(fit_path, options)
+
+    def _failed_decision(self, local_track: LocalTrack, exc: Exception, activity_id: int | None = None) -> SyncDecision:
+        message = str(exc).strip()
+        return SyncDecision(
+            source_path=local_track.track_file.source_path,
+            status="failed",
+            token=local_track.token,
+            planned_name=local_track.planned_name,
+            activity_id=activity_id,
+            message=f"{type(exc).__name__}: {message}" if message else type(exc).__name__,
         )
 
     def backfill(self, files: list[Path], garmin: GarminGateway, options: SyncOptions) -> list[SyncDecision]:
@@ -277,10 +264,7 @@ class SyncService:
             matches = find_legacy_matches(local_track, index, options.match_options)
             if len(matches) == 1:
                 match = matches[0]
-                if not is_gcu_activity(match):
-                    decisions.append(self._signature_rejected_decision(local_track, match))
-                    continue
-                new_name = append_or_replace_token(match.activity_name, local_track.token)
+                new_name = self._legacy_backfill_name(local_track, match)
                 if not options.dry_run:
                     garmin.update_activity_name(match.activity_id, new_name)
                 decisions.append(
@@ -409,9 +393,7 @@ class SyncService:
         legacy_matches = find_legacy_matches(local_track, index, options.match_options)
         if len(legacy_matches) == 1:
             match = legacy_matches[0]
-            if not is_gcu_activity(match):
-                return self._signature_rejected_decision(local_track, match)
-            new_name = append_or_replace_token(match.activity_name, local_track.token)
+            new_name = self._legacy_backfill_name(local_track, match)
             return SyncDecision(
                 source_path=local_track.track_file.source_path,
                 status="skip-legacy-match",
@@ -468,39 +450,6 @@ class SyncService:
         handle = tempfile.NamedTemporaryFile(prefix=f"{source.stem}-", suffix=".fit", delete=False)
         handle.close()
         return Path(handle.name)
-
-    def _locate_uploaded_activity(
-        self,
-        local_track: LocalTrack,
-        garmin: GarminGateway,
-        max_wait_s: int,
-    ) -> RemoteActivity | None:
-        if not hasattr(garmin, "wait_for_activity_match"):
-            return None
-        metadata = local_track.track_file.track.metadata
-        local_start_ms = int(metadata.start_time_utc.timestamp() * 1000)
-
-        def predicate(activity: RemoteActivity) -> bool:
-            if activity.begin_timestamp_ms is None:
-                return False
-            if activity.start_latitude is None or activity.start_longitude is None:
-                return False
-            time_diff_s = abs(activity.begin_timestamp_ms - local_start_ms) / 1000
-            lat_diff = abs(activity.start_latitude - metadata.start_latitude)
-            lon_diff = abs(activity.start_longitude - metadata.start_longitude)
-            if time_diff_s > self._default_post_upload_time_tolerance_s:
-                return False
-            if lat_diff > self._default_post_upload_coord_tolerance_deg:
-                return False
-            if lon_diff > self._default_post_upload_coord_tolerance_deg:
-                return False
-            return True
-
-        return garmin.wait_for_activity_match(
-            metadata.start_time_utc.date(),
-            predicate,
-            max_wait_s=max_wait_s,
-        )
 
     def _wait_for_uploaded_activity(
         self,
@@ -568,9 +517,7 @@ class SyncService:
         matches = find_legacy_matches(local_track, index, options.match_options)
         if len(matches) == 1:
             match = matches[0]
-            if not is_gcu_activity(match):
-                return self._signature_rejected_decision(local_track, match)
-            new_name = append_or_replace_token(match.activity_name, local_track.token)
+            new_name = self._legacy_backfill_name(local_track, match)
             garmin.update_activity_name(match.activity_id, new_name)
             return SyncDecision(
                 source_path=local_track.track_file.source_path,
@@ -615,6 +562,11 @@ class SyncService:
                 f"(manufacturer={activity.manufacturer!r}, deviceId={activity.device_id!r}); refusing to modify"
             ),
         )
+
+    def _legacy_backfill_name(self, local_track: LocalTrack, activity: RemoteActivity) -> str:
+        if is_gcu_activity(activity):
+            return local_track.planned_name
+        return append_or_replace_token(activity.activity_name, local_track.token)
 
 
 def _date_chunks(start_date: date, end_date: date, chunk_days: int):

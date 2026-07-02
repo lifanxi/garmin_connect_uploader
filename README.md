@@ -169,6 +169,77 @@ to override the default base name.
 python -m unittest discover -s tests
 ```
 
+## Garmin HTTP Verbose Log
+
+Set `GCU_GARMIN_VERBOSE_HTTP=1` to record Garmin HTTP request and response
+exchanges. On Windows, the default log path is
+`%LOCALAPPDATA%\GarminConnectUploader\garmin-connect-http.log`; on other
+platforms it is `garmin-connect-http.log` in the current directory. Override it
+with `GCU_GARMIN_VERBOSE_HTTP_LOG`.
+
+The verbose log includes request/response URLs, methods, headers, and bodies.
+It may contain Garmin credentials, cookies, bearer tokens, and uploaded FIT
+payloads, so only enable it for local debugging and do not share the file.
+
+## Windows Installer
+
+The Windows installer bundles the Python runtime and all Python dependencies, so
+end users do not need to install Python first. Build the installer on Windows:
+
+```powershell
+winget install JRSoftware.InnoSetup
+.\scripts\build_windows_installer.ps1 -Version 0.1.0
+```
+
+The output is written to:
+
+```text
+dist\installer\GarminConnectUploader-0.1.0-Setup.exe
+```
+
+The installer includes:
+
+- `GarminConnectUploader.exe`, the desktop GUI.
+- `gcu.exe`, the command-line interface.
+- PySide6, garth, FIT writer, timezone/city lookup dependencies, and the Python
+  runtime collected by PyInstaller.
+
+Garmin API requests and SSO page requests override garth's built-in
+User-Agent in the application layer; the packaging script does not patch
+installed site-packages.
+
+You can also build the same installer with the `Build Windows Installer` GitHub
+Actions workflow. The workflow runs on `windows-latest` and uploads the setup
+`.exe` as an artifact.
+
+### Code Signing
+
+To avoid "Unknown Publisher" warnings, sign both bundled executables and the
+installer with an Authenticode code-signing certificate. The build script can do
+this automatically after PyInstaller and Inno Setup finish.
+
+Use a certificate from the current user's certificate store:
+
+```powershell
+.\scripts\build_windows_installer.ps1 -Version 0.1.0 -Sign -CertThumbprint "<SHA1_THUMBPRINT>"
+```
+
+Or sign with a PFX file:
+
+```powershell
+.\scripts\build_windows_installer.ps1 -Version 0.1.0 -PfxPath ".\codesign.pfx" -PfxPassword "<password>"
+```
+
+The script uses SHA-256 signing and RFC 3161 timestamping. It signs:
+
+- `dist\GarminConnectUploader\GarminConnectUploader.exe`
+- `dist\GarminConnectUploader\gcu.exe`
+- `dist\installer\GarminConnectUploader-<version>-Setup.exe`
+
+Code signing proves publisher identity and file integrity. Microsoft Defender
+SmartScreen reputation is separate and may still require real-world reputation
+to build for a new certificate or new binary.
+
 ## Repository Layout
 
 ```text
@@ -179,6 +250,8 @@ gcu/export     FIT writer
 gcu/formats    input format readers and display resolvers
 gcu/garmin     Garmin Connect client
 gcu/gui        desktop GUI
+packaging      PyInstaller and Inno Setup files
+scripts        packaging helper scripts
 tests          unit tests
 docs           design notes
 ```

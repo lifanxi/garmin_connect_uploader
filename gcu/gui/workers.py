@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from collections.abc import Callable
 from typing import Any
 
@@ -29,6 +30,6 @@ class TaskWorker(QRunnable):
             else:
                 self.signals.result.emit(self.task())
         except BaseException as exc:  # pragma: no cover - Qt thread boundary
-            self.signals.error.emit(str(exc))
+            self.signals.error.emit("".join(traceback.format_exception(exc)))
         finally:
             self.signals.finished.emit()

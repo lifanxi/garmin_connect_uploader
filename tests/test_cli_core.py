@@ -4,8 +4,13 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
-from gcu.app.models import RemoteActivity, UploadResult
+from requests import Response
+from requests import Session
+from requests import Request
+
+from gcu.app.models import RemoteActivity, SyncDecision, UploadResult
 from gcu.app.models import TrackPoint
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
@@ -19,8 +24,12 @@ from gcu.formats.columbus_csv import ColumbusCsvReader
 from gcu.formats.nmea_rmc import NmeaRmcReader
 from gcu.formats.timezone_resolver import resolve_display_timezone
 from gcu.garmin.client import _classify_upload_error
+from gcu.garmin.client import _extract_email
+from gcu.garmin.client import GARMIN_WEB_USER_AGENT, GarminClient
 from gcu.garmin.errors import DuplicateUploadError, UploadConsentRequiredError
 from gcu.garmin.signature import GCU_DEVICE_ID, GCU_MANUFACTURER
+from gcu.garmin.verbose_http import configure_verbose_http_logging
+from gcu.gui.main import TRANSLATIONS, _format_decision_summary, _friendly_error_message, _localized_plan_status
 
 
 CSV_TEXT = """INDEX,TAG,DATE,TIME,LATITUDE N/S,LONGITUDE E/W,HEIGHT,SPEED,HEADING
@@ -42,6 +51,153 @@ $GPRMC,211908.000,A,3716.8167,N,12151.9176,W,59.06,160.25,050911,,*20
 
 
 class CoreCliTests(unittest.TestCase):
+    def test_gui_error_summary_keeps_traceback_as_detail(self):
+        def tr(key):
+            return {
+                "error_login_summary": "Login failed.",
+                "error_auth_summary": "Auth failed.",
+                "error_network_summary": "Network failed.",
+                "error_server_summary": "Server failed.",
+                "error_default_summary": "Operation failed.",
+            }[key]
+
+        message = 'Traceback...\ngarth.exc.GarthException: SSO error: FAILURE'
+
+        self.assertEqual(
+            _friendly_error_message(message, tr, context="login"),
+            "Login failed.\n\ngarth.exc.GarthException: SSO error: FAILURE",
+        )
+        self.assertEqual(
+            _friendly_error_message("requests.exceptions.Timeout: timed out", tr),
+            "Network failed.\n\nrequests.exceptions.Timeout: timed out",
+        )
+
+    def test_gui_has_friendly_missing_session_message(self):
+        self.assertIn("无有效登录凭证", TRANSLATIONS["zh"]["no_valid_session"])
+        self.assertIn("No valid login session", TRANSLATIONS["en"]["no_valid_session"])
+
+    def test_gui_localizes_plan_status_and_summary(self):
+        tr = lambda key, **kwargs: TRANSLATIONS["zh"][key].format(**kwargs) if kwargs else TRANSLATIONS["zh"][key]
+        decisions = [
+            SyncDecision(source_path=Path("a.CSV"), status="upload", token="a", planned_name="a"),
+            SyncDecision(source_path=Path("b.CSV"), status="skip-token", token="b", planned_name="b"),
+            SyncDecision(source_path=Path("c.CSV"), status="skip-legacy-match", token="c", planned_name="c"),
+            SyncDecision(source_path=Path("d.CSV"), status="failed", token="d", planned_name="d"),
+            SyncDecision(source_path=Path("e.CSV"), status="ambiguous", token="e", planned_name="e"),
+        ]
+
+        self.assertEqual(_localized_plan_status("upload", tr), "上传")
+        self.assertEqual(_localized_plan_status("skip-token", tr), "跳过")
+        self.assertEqual(_localized_plan_status("skip-legacy-match", tr), "补填Token")
+        self.assertEqual(_localized_plan_status("ambiguous", tr), "需人工确认")
+        self.assertEqual(
+            _format_decision_summary(decisions, tr, plan=True),
+            "已完成 5 个轨迹任务计划，其中上传 1 条，跳过 1 条，补填Token 1 条，失败 1 条，其它 1 条",
+        )
+
+    def test_garmin_client_overrides_garth_user_agent(self):
+        client = GarminClient(domain="garmin.cn")
+
+        self.assertEqual(client.client.sess.headers["User-Agent"], GARMIN_WEB_USER_AGENT)
+        self.assertEqual(client.garth.sso.SSO_PAGE_HEADERS["User-Agent"], GARMIN_WEB_USER_AGENT)
+
+    def test_garmin_client_uses_isolated_garth_client(self):
+        first = GarminClient(domain="garmin.cn")
+        second = GarminClient(domain="garmin.cn")
+
+        self.assertIsNot(first.client, second.client)
+        self.assertIsNot(first.client, first.garth.client)
+
+    def test_verbose_http_logging_records_request_and_response(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        log_path = Path(directory.name) / "http.log"
+        session = Session()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "GCU_GARMIN_VERBOSE_HTTP": "1",
+                "GCU_GARMIN_VERBOSE_HTTP_LOG": str(log_path),
+            },
+        ):
+            configure_verbose_http_logging(session)
+
+        request = Request(
+            "POST",
+            "https://connectapi.garmin.cn/upload-service/upload",
+            headers={"Authorization": "Bearer token"},
+            data=b"body",
+        )
+        prepared = session.prepare_request(request)
+        response = Response()
+        response.status_code = 200
+        response.reason = "OK"
+        response.url = prepared.url
+        response.request = prepared
+        response._content = b'{"activityId":123}'
+        response.headers["Content-Type"] = "application/json"
+
+        for hook in session.hooks["response"]:
+            hook(response)
+
+        text = log_path.read_text(encoding="utf-8")
+        self.assertIn("POST https://connectapi.garmin.cn/upload-service/upload", text)
+        self.assertIn("Authorization: Bearer token", text)
+        self.assertIn("body", text)
+        self.assertIn('{"activityId":123}', text)
+
+    def test_verbose_http_logging_failure_does_not_break_response_hook(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        session = Session()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "GCU_GARMIN_VERBOSE_HTTP": "1",
+                "GCU_GARMIN_VERBOSE_HTTP_LOG": directory.name,
+            },
+        ):
+            configure_verbose_http_logging(session)
+
+        request = Request("GET", "https://connectapi.garmin.cn/test")
+        prepared = session.prepare_request(request)
+        response = Response()
+        response.status_code = 200
+        response.reason = "OK"
+        response.url = prepared.url
+        response.request = prepared
+        response._content = b"ok"
+
+        for hook in session.hooks["response"]:
+            self.assertIs(hook(response), response)
+
+    def test_current_user_prefers_saved_email_hint_over_profile_phone(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        client = GarminClient(domain="garmin.cn", session_dir=Path(directory.name))
+        client._save_account_hint("person@example.com")
+
+        class ProfileClient:
+            def connectapi(self, path):
+                return {
+                    "userName": "13800138000",
+                    "displayName": "Display",
+                    "fullName": "Full Name",
+                    "profileId": 123,
+                }
+
+        client.client = ProfileClient()
+        user = client.current_user()
+
+        self.assertEqual(user.username, "13800138000")
+        self.assertEqual(user.email, "person@example.com")
+
+    def test_extract_email_accepts_common_profile_keys(self):
+        self.assertEqual(_extract_email({"emailAddress": "person@example.com"}), "person@example.com")
+        self.assertEqual(_extract_email({"userName": "13800138000"}), "")
+
     def test_columbus_reader_normalizes_and_sorts_points(self):
         path = self._write_csv(CSV_TEXT)
         track_file = ColumbusCsvReader().read(path, FormatOptions())
@@ -153,6 +309,63 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(report.overlapping_points[0].count, 2)
         self.assertEqual(len(report.conflicting_points), 2)
 
+    def test_precheck_reports_file_progress(self):
+        first = self._write_csv(CSV_TEXT, name="progress-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="progress-b.CSV")
+        seen = []
+
+        PrecheckService().check(
+            [first, second],
+            SyncOptions(format_options=FormatOptions()),
+            on_file=lambda index, count, path: seen.append((index, count, path.name)),
+        )
+
+        self.assertEqual(seen, [(1, 2, "progress-a.CSV"), (2, 2, "progress-b.CSV")])
+
+    def test_precheck_reports_parsed_tracks_for_reuse(self):
+        first = self._write_csv(CSV_TEXT, name="reuse-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="reuse-b.CSV")
+        tracks = []
+
+        report = PrecheckService().check(
+            [first, second],
+            SyncOptions(format_options=FormatOptions()),
+            on_track=tracks.append,
+        )
+
+        self.assertEqual(report.checked_count, 2)
+        self.assertEqual([track.track_file.source_path.name for track in tracks], ["reuse-a.CSV", "reuse-b.CSV"])
+
+    def test_precheck_records_file_errors_without_stopping(self):
+        good = self._write_csv(CSV_TEXT, name="good.CSV")
+        bad = self._write_file("not a supported track\n", "bad.txt")
+
+        report = PrecheckService().check(
+            [bad, good],
+            SyncOptions(format_options=FormatOptions()),
+        )
+
+        self.assertEqual(report.checked_count, 1)
+        self.assertEqual(len(report.file_errors), 1)
+        self.assertEqual(report.file_errors[0].source_path, bad)
+        self.assertIn("Could not detect track format", report.file_errors[0].message)
+
+    def test_precheck_can_be_canceled_between_files(self):
+        first = self._write_csv(CSV_TEXT, name="cancel-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="cancel-b.CSV")
+        seen = []
+
+        report = PrecheckService().check(
+            [first, second],
+            SyncOptions(format_options=FormatOptions()),
+            on_file=lambda index, count, path: seen.append(path.name),
+            should_cancel=lambda: bool(seen),
+        )
+
+        self.assertTrue(report.canceled)
+        self.assertEqual(report.checked_count, 1)
+        self.assertEqual(seen, ["cancel-a.CSV"])
+
     def test_cli_expands_globs_for_windows_shells(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -219,7 +432,7 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(decisions[0].activity_id, 456)
         self.assertIn(local_track.token, garmin.updated_name)
 
-    def test_backfill_refuses_to_modify_unsigned_remote_activity(self):
+    def test_backfill_unsigned_remote_activity_adds_token_only(self):
         path = self._write_csv(CSV_TEXT)
         local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
         metadata = local_track.track_file.track.metadata
@@ -237,11 +450,11 @@ class CoreCliTests(unittest.TestCase):
 
         decisions = SyncService().backfill([path], garmin, SyncOptions(format_options=FormatOptions()))
 
-        self.assertEqual(decisions[0].status, "failed")
-        self.assertEqual(garmin.updated_name, "")
-        self.assertIn("not signed as GCU upload", decisions[0].message)
+        self.assertEqual(decisions[0].status, "backfilled-token")
+        self.assertEqual(garmin.updated_name, f"External activity {local_track.token}")
+        self.assertEqual(decisions[0].planned_name, garmin.updated_name)
 
-    def test_dry_run_refuses_unsigned_legacy_match(self):
+    def test_dry_run_unsigned_legacy_match_preserves_remote_name_and_adds_token(self):
         path = self._write_csv(CSV_TEXT)
         local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
         metadata = local_track.track_file.track.metadata
@@ -259,8 +472,29 @@ class CoreCliTests(unittest.TestCase):
 
         decisions = SyncService().sync([path], garmin, SyncOptions(format_options=FormatOptions(), dry_run=True))
 
-        self.assertEqual(decisions[0].status, "failed")
-        self.assertIn("not signed as GCU upload", decisions[0].message)
+        self.assertEqual(decisions[0].status, "skip-legacy-match")
+        self.assertEqual(decisions[0].planned_name, f"External activity {local_track.token}")
+
+    def test_signed_legacy_match_uses_planned_activity_name(self):
+        path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
+        metadata = local_track.track_file.track.metadata
+        remote = RemoteActivity(
+            activity_id=656,
+            activity_name="Old external-ish name",
+            begin_timestamp_ms=int(metadata.start_time_utc.timestamp() * 1000),
+            start_latitude=metadata.start_latitude,
+            start_longitude=metadata.start_longitude,
+            duration_s=metadata.duration_s,
+            manufacturer=GCU_MANUFACTURER,
+            device_id=GCU_DEVICE_ID,
+        )
+        garmin = ExistingActivityGarmin(remote)
+
+        decisions = SyncService().sync([path], garmin, SyncOptions(format_options=FormatOptions(), dry_run=True))
+
+        self.assertEqual(decisions[0].status, "skip-legacy-match")
+        self.assertEqual(decisions[0].planned_name, local_track.planned_name)
 
     def test_sync_uploads_larger_tracks_first(self):
         long_path = self._write_csv(CSV_TEXT, name="long.CSV")
@@ -273,6 +507,38 @@ class CoreCliTests(unittest.TestCase):
         service.sync([short_path, long_path], garmin, options)
 
         self.assertEqual(garmin.updated_names[0], long_name)
+
+    def test_sync_continues_after_single_upload_exception(self):
+        first = self._write_csv(CSV_TEXT, name="upload-fails.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="upload-ok.CSV")
+        garmin = FirstUploadFailsGarmin()
+
+        decisions = SyncService().sync([first, second], garmin, SyncOptions(format_options=FormatOptions()))
+
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0].status, "failed")
+        self.assertIn("RuntimeError: upload failed", decisions[0].message)
+        self.assertEqual(decisions[1].status, "upload")
+        self.assertEqual(garmin.upload_count, 2)
+
+    def test_sync_reports_upload_progress_events(self):
+        path = self._write_csv(CSV_TEXT, name="progress-upload.CSV")
+        local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
+        garmin = ImmediateUploadGarmin()
+        events = []
+
+        SyncService().sync_tracks(
+            [local_track],
+            garmin,
+            SyncOptions(format_options=FormatOptions()),
+            on_progress=lambda event, track, details: events.append(event),
+        )
+
+        self.assertIn("planning", events)
+        self.assertIn("write-fit", events)
+        self.assertIn("upload", events)
+        self.assertIn("wait-uploaded", events)
+        self.assertIn("update-name", events)
 
     def test_upload_with_activity_id_refuses_unsigned_remote_activity(self):
         path = self._write_csv(CSV_TEXT)
@@ -323,10 +589,10 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertEqual(service._estimated_post_upload_wait_s(local_track, options), 32)
 
-    def test_upload_without_activity_id_is_tagged_by_background_lookup(self):
+    def test_upload_without_activity_id_waits_and_tags_before_next_track(self):
         path = self._write_csv(CSV_TEXT)
         service = SyncService()
-        options = SyncOptions(format_options=FormatOptions(), post_upload_tag_workers=2)
+        options = SyncOptions(format_options=FormatOptions())
         local_track = service.inspect([path], options)[0]
         metadata = local_track.track_file.track.metadata
         remote = RemoteActivity(
@@ -345,6 +611,18 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertEqual(decisions[0].activity_id, 789)
         self.assertIn(local_track.token, garmin.updated_name)
+
+    def test_sync_uploads_serially_until_activity_is_tagged(self):
+        first = self._write_csv(CSV_TEXT, name="serial-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="serial-b.CSV")
+        service = SyncService()
+        tracks = service.inspect([first, second], SyncOptions(format_options=FormatOptions()))
+        garmin = SerialOrderGarmin(tracks)
+
+        decisions = service.sync_tracks(tracks, garmin, SyncOptions(format_options=FormatOptions()))
+
+        self.assertEqual([decision.status for decision in decisions], ["upload", "upload"])
+        self.assertLess(garmin.events.index("update:1"), garmin.events.index("upload:2"))
 
     def test_purge_deletes_only_signed_gcu_activities(self):
         signed = RemoteActivity(
@@ -466,22 +744,72 @@ class ImmediateUploadGarmin:
         self.updated_names.append(activity_name)
 
 
+class FirstUploadFailsGarmin(ImmediateUploadGarmin):
+    def upload_activity(self, file_path):
+        self.upload_count += 1
+        if self.upload_count == 1:
+            raise RuntimeError("upload failed")
+        self.next_id += 1
+        self.activities.append(
+            RemoteActivity(
+                activity_id=self.next_id,
+                activity_name="Uploaded activity",
+                manufacturer=GCU_MANUFACTURER,
+                device_id=GCU_DEVICE_ID,
+            )
+        )
+        return UploadResult(activity_id=self.next_id)
+
+
 class DeferredLookupGarmin:
     def __init__(self, remote: RemoteActivity):
         self.remote = remote
         self.updated_name = ""
+        self.uploaded = False
 
     def list_activities(self, start_date, end_date):
-        return []
+        return [self.remote] if self.uploaded else []
 
     def upload_activity(self, file_path):
+        self.uploaded = True
         return UploadResult(activity_id=None)
-
-    def wait_for_activity_match(self, start_date, predicate, max_wait_s=30):
-        return self.remote if predicate(self.remote) else None
 
     def update_activity_name(self, activity_id: int, activity_name: str):
         self.updated_name = activity_name
+
+
+class SerialOrderGarmin:
+    def __init__(self, tracks: list):
+        self.events: list[str] = []
+        self.next_upload = 0
+        self.activities: list[RemoteActivity] = []
+        self.by_id: dict[int, RemoteActivity] = {}
+        for activity_id, track in enumerate(tracks, start=1):
+            metadata = track.track_file.track.metadata
+            activity = RemoteActivity(
+                activity_id=activity_id,
+                activity_name="Uploaded activity",
+                begin_timestamp_ms=int(metadata.start_time_utc.timestamp() * 1000),
+                start_latitude=metadata.start_latitude,
+                start_longitude=metadata.start_longitude,
+                duration_s=metadata.duration_s,
+                manufacturer=GCU_MANUFACTURER,
+                device_id=GCU_DEVICE_ID,
+            )
+            self.by_id[activity_id] = activity
+
+    def list_activities(self, start_date, end_date):
+        return list(self.activities)
+
+    def upload_activity(self, file_path):
+        self.next_upload += 1
+        self.events.append(f"upload:{self.next_upload}")
+        activity = self.by_id[self.next_upload]
+        self.activities.append(activity)
+        return UploadResult(activity_id=activity.activity_id)
+
+    def update_activity_name(self, activity_id: int, activity_name: str):
+        self.events.append(f"update:{activity_id}")
 
 
 class PurgeGarmin:

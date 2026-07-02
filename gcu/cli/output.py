@@ -64,6 +64,10 @@ def print_precheck_report(report: PrecheckReport, as_json: bool = False) -> None
         return
 
     print(f"checked={report.checked_count}")
+    print(f"file_errors={len(report.file_errors)}")
+    for item in report.file_errors:
+        print(f"  {item.source_path}: {item.message}")
+
     print(f"duplicate_track_groups={len(report.duplicate_groups)}")
     for group in report.duplicate_groups:
         print(f"  token={group.token}")
@@ -97,6 +101,7 @@ def print_authenticated_user(user: AuthenticatedUser, domain: str, session_dir: 
         "domain": domain,
         "session_dir": str(session_dir),
         "username": user.username,
+        "email": user.email,
         "display_name": user.display_name,
         "full_name": user.full_name,
         "profile_id": user.profile_id,
@@ -104,7 +109,7 @@ def print_authenticated_user(user: AuthenticatedUser, domain: str, session_dir: 
     if as_json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
-    username = user.username or "-"
+    username = user.email or user.username or "-"
     display = f" display_name={user.display_name}" if user.display_name else ""
     print(f"Garmin session is usable for {domain}: username={username}{display}")
     print(f"Garmin session saved in {session_dir}")

@@ -614,8 +614,10 @@ duration_tolerance_s = 120
 post_upload_wait_base_s = 30
 post_upload_wait_per_1000_points_s = 5
 post_upload_max_wait_s = 180
-post_upload_tag_workers = 4
 ```
+
+上传同步必须串行执行：一条轨迹完成上传、等待到对应活动、校验签名并完成命名
+更新后，才处理下一条轨迹。
 
 跨平台依赖要求：
 

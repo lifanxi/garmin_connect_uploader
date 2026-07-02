@@ -4,8 +4,11 @@ __pycache__/
 
 .venv/
 venv/
+.packaging-venv/
 
 bak/
+build/
+dist/
 
 *.fit
 *.gpx

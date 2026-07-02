@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -8,22 +9,52 @@ from typing import Any
 
 from gcu.app.models import AuthenticatedUser, RemoteActivity, UploadResult
 from gcu.garmin.errors import DuplicateUploadError, UploadConsentRequiredError
+from gcu.garmin.verbose_http import configure_verbose_http_logging
+
+
+GARMIN_WEB_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+ACCOUNT_HINT_FILE = "gcu_account.json"
+EMAIL_KEYS = ("email", "emailAddress", "email_address", "userEmail", "user_email", "primaryEmail", "primary_email")
 
 
 class GarminClient:
     def __init__(self, domain: str = "garmin.cn", session_dir: Path | None = None):
         try:
             import garth
+            from garth.http import Client as GarthHttpClient
             from garth.exc import GarthException, GarthHTTPError
         except ImportError as exc:
             raise RuntimeError("Garmin access requires garth. Install it with: pip install garth") from exc
 
         self.garth = garth
+        self.client = GarthHttpClient(
+            telemetry_enabled=False,
+            telemetry_send_to_logfire=False,
+        )
         self.GarthException = GarthException
         self.GarthHTTPError = GarthHTTPError
         self.domain = domain
         self.session_dir = session_dir or (Path.home() / ".garth")
-        self.garth.configure(domain=domain)
+        self.client.configure(
+            domain=domain,
+            telemetry_enabled=False,
+            telemetry_send_to_logfire=False,
+        )
+        self._configure_user_agent()
+        configure_verbose_http_logging(self.client.sess)
+
+    def _configure_user_agent(self) -> None:
+        self.client.sess.headers.update({"User-Agent": GARMIN_WEB_USER_AGENT})
+
+        sso = getattr(self.garth, "sso", None)
+        if sso is not None and hasattr(sso, "SSO_PAGE_HEADERS"):
+            sso.SSO_PAGE_HEADERS["User-Agent"] = GARMIN_WEB_USER_AGENT
 
     def ensure_session(
         self,
@@ -33,8 +64,8 @@ class GarminClient:
     ) -> None:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self.garth.resume(str(self.session_dir))
-            getattr(self.garth.client, "username", None)
+            self.client.load(str(self.session_dir))
+            getattr(self.client, "username", None)
             return
         except (self.GarthException, FileNotFoundError, OSError):
             pass
@@ -49,15 +80,16 @@ class GarminClient:
             from getpass import getpass
 
             password = getpass("Garmin password: ")
-        self.garth.login(username, password)
-        self.garth.save(str(self.session_dir))
+        self.client.login(username, password)
+        self.client.dump(str(self.session_dir))
+        self._save_account_hint(username)
 
     def list_activities(self, start_date: date, end_date: date) -> list[RemoteActivity]:
         activities: list[RemoteActivity] = []
         offset = 0
         page_size = 100
         while True:
-            page = self.garth.client.connectapi(
+            page = self.client.connectapi(
                 "/activitylist-service/activities/search/activities",
                 params={
                     "startDate": start_date.isoformat(),
@@ -77,7 +109,7 @@ class GarminClient:
     def upload_activity(self, file_path: Path) -> UploadResult:
         with file_path.open("rb") as handle:
             try:
-                raw = self.garth.client.upload(handle)
+                raw = self.client.upload(handle)
             except self.GarthHTTPError as exc:
                 response = getattr(getattr(exc, "error", None), "response", None)
                 upload_error = _classify_upload_error(response)
@@ -89,14 +121,14 @@ class GarminClient:
         return UploadResult(activity_id=_extract_activity_id(raw), raw=raw)
 
     def update_activity_name(self, activity_id: int, activity_name: str):
-        return self.garth.client.connectapi(
+        return self.client.connectapi(
             f"/activity-service/activity/{activity_id}",
             method="PUT",
             json={"activityId": activity_id, "activityName": activity_name},
         )
 
     def delete_activity(self, activity_id: int):
-        return self.garth.client.connectapi(
+        return self.client.connectapi(
             f"/activity-service/activity/{activity_id}",
             method="DELETE",
         )
@@ -106,17 +138,36 @@ class GarminClient:
         self.list_activities(today - timedelta(days=7), today)
 
     def current_user(self, fallback_username: str | None = None) -> AuthenticatedUser:
+        account_hint = self._load_account_hint()
+        fallback_email = _email_or_empty(fallback_username) or _email_or_empty(account_hint.get("login_username"))
         try:
-            profile = self.garth.UserProfile.get(client=self.garth.client)
+            profile = self.client.connectapi("/userprofile-service/socialProfile")
+            assert isinstance(profile, dict)
         except Exception:
-            username = fallback_username or getattr(self.garth.client, "username", "") or ""
-            return AuthenticatedUser(username=username)
+            username = fallback_username or getattr(self.client, "username", "") or ""
+            return AuthenticatedUser(username=username, email=fallback_email)
         return AuthenticatedUser(
-            username=profile.user_name or fallback_username or "",
-            display_name=profile.display_name or "",
-            full_name=profile.full_name or "",
-            profile_id=profile.profile_id,
+            username=str(profile.get("userName") or fallback_username or ""),
+            email=_extract_email(profile) or fallback_email,
+            display_name=str(profile.get("displayName") or ""),
+            full_name=str(profile.get("fullName") or ""),
+            profile_id=_int_or_none(profile.get("profileId")),
         )
+
+    def _save_account_hint(self, login_username: str | None) -> None:
+        if not login_username:
+            return
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        path = self.session_dir / ACCOUNT_HINT_FILE
+        path.write_text(json.dumps({"login_username": login_username}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_account_hint(self) -> dict[str, Any]:
+        path = self.session_dir / ACCOUNT_HINT_FILE
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def wait_for_activity_match(
         self,
@@ -207,6 +258,22 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_email(profile: dict[str, Any]) -> str:
+    for key in EMAIL_KEYS:
+        value = profile.get(key)
+        email = _email_or_empty(value)
+        if email:
+            return email
+    return ""
+
+
+def _email_or_empty(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return text if "@" in text and "." in text.rsplit("@", 1)[-1] else ""
 
 
 def _classify_upload_error(response: Any) -> RuntimeError | None:
