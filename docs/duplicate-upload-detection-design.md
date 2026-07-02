@@ -237,9 +237,9 @@ macOS/Linux shell 下的 `tracks/*.CSV` 参数行为一致。
 CLI 输出模式：
 
 - 默认人类可读表格。
-- `--json` 输出机器可读事件流或结果数组。
-- `--verbose` 输出 Garmin API 查询、匹配分数和警告。
-- `--quiet` 只输出错误和最终摘要。
+- `--json` 输出机器可读结果数组。
+- Garmin HTTP 详细日志通过环境变量 `GCU_GARMIN_VERBOSE_HTTP=1` 开关（并通过 `GCU_GARMIN_VERBOSE_HTTP_LOG` 指定路径），
+  见 README 的相关说明。
 
 建议每个文件的最终状态使用固定枚举：
 
@@ -478,7 +478,7 @@ date -> list[RemoteActivity]
      决策为 `upload-conflict`。
    - 否则报告冲突，用户后续用 backfill 或人工检查处理。
 
-`--dry-run` 必须执行到决策阶段，但不上传、不更新 Garmin 元数据、不写临时 FIT，除非用户显式要求 `--dry-run --render-fit`。
+`--dry-run` 必须执行到决策阶段，但不上传、不更新 Garmin 元数据、不写临时 FIT。
 
 ## 上传后定位
 
@@ -508,10 +508,8 @@ per_1000_points_s = 5
 max_wait_s = 180
 ```
 
-上传主循环不应在每个文件上同步等待完整定位时间。如果上传响应没有可靠
-`activityId`，应把“等待活动出现在列表接口并写入 token”的工作提交给后台
-worker，然后继续上传后续文件。整批上传结束前等待这些后台打标任务收尾。
-这样长文件的 Garmin 后台处理时间可以与后续文件上传重叠。
+同步流程为严格串行：每条轨迹在当前文件完成上传、定位、签名校验与命名更新后，
+再继续处理下一条。这样可避免并发更新时的状态竞争与活动归属歧义。
 
 定位失败时：
 
@@ -569,7 +567,7 @@ Backfill 输出应包含：
 - `UploadConflictError`：Garmin 返回冲突且无法唯一定位。
 - `PostUploadTaggingError`：上传成功但 token 写入失败。
 
-批量同步默认继续处理后续文件，最后汇总失败。`--fail-fast` 可在首个错误时退出。
+批量同步默认继续处理后续文件，最后汇总失败。
 
 ## 临时文件和输出
 

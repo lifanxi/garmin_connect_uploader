@@ -11,7 +11,10 @@ format-neutral core so the CLI and GUI share the same application services.
 - Convert tracks to FIT activities.
 - Upload to Garmin Connect through `garth`.
 - Detect duplicates with stable `[gcu:v1:...]` activity-name tokens.
-- Backfill tokens only on activities signed as this tool's uploads.
+- Backfill token markers for duplicates (when an exact token match is found) and for
+  legacy matches.
+- Backfill updates activity names only when the matched activity is signed as a
+  tool upload; otherwise it only appends/replaces the token.
 - Purge only activities signed as this tool's uploads.
 - Resolve display timezone from the first five minutes of track coordinates.
 - Include an offline city estimate from the middle segment in activity titles.
@@ -59,10 +62,10 @@ The GUI is a single-window workflow:
   the current directory. If the saved session is valid, file and cleanup actions
   are enabled and the login button changes to Logout. If not, only login remains
   enabled. Logging out removes `.garth_session`.
-- Files are managed in the middle table. Inspect runs local pre-check,
-  per-file metadata inspection, and dry-run planning; Run performs the actual
-  sync. The table can be sorted by clicking headers and defaults to sorting
-  inspected files by Start UTC.
+- Files are managed in the middle table. Inspect runs local pre-check and per-file
+  metadata parsing, then produces dry-run planning for valid tracks; Run performs
+  the actual sync. The table can be sorted by clicking headers and defaults to
+  sorting inspected files by Start UTC.
 - Cleanup is at the bottom. Clean Uploaded Tracks first previews signed GCU
   activities in the selected date range, shows them in a confirmation dialog,
   and requires typing `DELETE` before deletion.
@@ -99,10 +102,14 @@ python gcu_cli.py convert input.CSV --output output.fit
 Authenticate and sync:
 
 ```bash
-python gcu_cli.py auth login --domain garmin.cn --session-dir garth_session
-python gcu_cli.py auth status --domain garmin.cn --session-dir garth_session --json
-python gcu_cli.py sync tracks/*.CSV --domain garmin.cn --session-dir garth_session
+python gcu_cli.py auth login --domain garmin.cn
+python gcu_cli.py auth status --domain garmin.cn --json
+python gcu_cli.py sync tracks/*.CSV --domain garmin.cn
 ```
+
+`--session-dir` is optional. If omitted, `garmin` stores session tokens in the
+default `~/.garth` directory for CLI usage. For GUI usage, sessions are kept in
+the current directory as `.garth_session`.
 
 `auth login` and `auth status` report the authenticated Garmin username when the
 profile API is available.
@@ -113,18 +120,21 @@ Preview duplicate decisions without uploading:
 python gcu_cli.py sync tracks/*.CSV --dry-run --offline
 ```
 
-Backfill tokens onto existing signed GCU activities:
+`--offline` skips Garmin activity lookup and assumes no remote matches, which is
+useful for local validation and dry test workflows.
+
+Backfill token markers onto matching activities:
 
 ```bash
-python gcu_cli.py backfill tracks/*.CSV --dry-run --session-dir garth_session
-python gcu_cli.py backfill tracks/*.CSV --session-dir garth_session
+python gcu_cli.py backfill tracks/*.CSV --dry-run
+python gcu_cli.py backfill tracks/*.CSV
 ```
 
 Delete all signed GCU activities from Garmin Connect:
 
 ```bash
-python gcu_cli.py purge --dry-run --session-dir garth_session
-python gcu_cli.py purge --yes --session-dir garth_session
+python gcu_cli.py purge --dry-run
+python gcu_cli.py purge --yes
 ```
 
 Limit purge by date:
