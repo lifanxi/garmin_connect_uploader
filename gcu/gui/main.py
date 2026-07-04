@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QLocale, QThreadPool, QTimer, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -137,6 +137,7 @@ RUNNABLE_PLAN_STATUSES = {"upload", "skip-legacy-match", "backfilled-token"}
 SUCCESSFUL_TASK_STATUSES = {"upload", "skip-token", "backfilled-token", "upload-conflict"}
 COMPLETED_PLAN_STATUSES = {"skip-token", "backfilled-token", "upload-conflict", "completed"}
 SUPPORTED_DOMAINS = {"garmin.com", "garmin.cn"}
+APP_ICON_PATH = Path("assets/icons/gcu-icon.png")
 
 
 TRANSLATIONS = {
@@ -468,6 +469,75 @@ def _language() -> str:
     return "zh" if name.startswith(("zh_CN", "zh_SG", "zh_Hans")) else "en"
 
 
+def _resource_path(relative_path: Path) -> Path:
+    pyinstaller_base = getattr(sys, "_MEIPASS", None)
+    if pyinstaller_base:
+        candidate = Path(pyinstaller_base) / relative_path
+        if candidate.exists():
+            return candidate
+    source_base = Path(__file__).resolve().parents[2]
+    candidate = source_base / relative_path
+    if candidate.exists():
+        return candidate
+    return Path(sys.executable).resolve().parent / relative_path
+
+
+def _apply_application_style(app: QApplication) -> None:
+    app.setStyleSheet(
+        """
+        QGroupBox#sectionGroup {
+            background-color: #fbfcfd;
+            border: 1px solid #cfd7df;
+            border-radius: 8px;
+            margin-top: 14px;
+            padding: 14px 10px 10px 10px;
+            font-weight: 600;
+        }
+
+        QGroupBox#sectionGroup::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            left: 10px;
+            top: 0px;
+            padding: 1px 9px;
+            color: #1f2933;
+            background-color: #ffffff;
+            border: 1px solid #cfd7df;
+            border-radius: 7px;
+        }
+
+        QTableWidget, QPlainTextEdit {
+            background-color: #ffffff;
+            border: 1px solid #b8c0c8;
+            border-radius: 4px;
+            selection-background-color: #d7ebff;
+            selection-color: #111827;
+        }
+
+        QHeaderView::section {
+            background-color: #f1f4f7;
+            border: 0px;
+            border-right: 1px solid #c3cbd3;
+            border-bottom: 1px solid #b8c0c8;
+            padding: 5px 6px;
+            font-weight: 600;
+        }
+
+        QProgressBar {
+            border: 0px;
+            border-radius: 3px;
+            background-color: #f4f6f8;
+            max-height: 6px;
+        }
+
+        QProgressBar::chunk {
+            border-radius: 3px;
+            background-color: #1677ff;
+        }
+        """
+    )
+
+
 def _normalize_domain(domain: str | None) -> str | None:
     return domain if domain in SUPPORTED_DOMAINS else None
 
@@ -551,6 +621,7 @@ class MainWindow(QMainWindow):
         self.status.setRange(0, 1)
         self.status.setValue(1)
         self.status.setTextVisible(False)
+        self.status.setFixedHeight(8)
         self.statusBar().addPermanentWidget(self.status, 1)
         self.statusBar().showMessage(self.tr("ready"))
         self._refresh_action_state()
@@ -563,6 +634,7 @@ class MainWindow(QMainWindow):
 
     def _build_login_page(self) -> QWidget:
         page = QGroupBox(self.tr("nav_login"))
+        page.setObjectName("sectionGroup")
         layout = QHBoxLayout(page)
 
         self.global_domain_radio = QRadioButton(self.tr("global_site"))
@@ -601,6 +673,7 @@ class MainWindow(QMainWindow):
 
     def _build_files_page(self) -> QWidget:
         page = QGroupBox(self.tr("nav_files"))
+        page.setObjectName("sectionGroup")
         layout = QVBoxLayout(page)
 
         toolbar = QHBoxLayout()
@@ -672,6 +745,7 @@ class MainWindow(QMainWindow):
 
     def _build_purge_page(self) -> QWidget:
         page = QGroupBox(self.tr("nav_purge"))
+        page.setObjectName("sectionGroup")
         layout = QHBoxLayout(page)
 
         self.purge_start = QDateEdit()
@@ -694,6 +768,7 @@ class MainWindow(QMainWindow):
 
     def _build_status_page(self) -> QWidget:
         page = QGroupBox(self.tr("status_log"))
+        page.setObjectName("sectionGroup")
         layout = QVBoxLayout(page)
         self.status_output = QPlainTextEdit()
         self.status_output.setReadOnly(True)
@@ -1635,9 +1710,10 @@ class MainWindow(QMainWindow):
         self.login_button.setText(self.tr("logout") if self._authenticated else self.tr("login"))
 
         authenticated_idle = self._authenticated and not task_running
-        self.purge_page.setEnabled(authenticated_idle)
+        self.purge_start.setEnabled(authenticated_idle)
+        self.purge_end.setEnabled(authenticated_idle)
+        self.purge_button.setEnabled(authenticated_idle)
 
-        self.files_page.setEnabled(self._authenticated)
         self.files_table.setEnabled(self._authenticated)
         file_controls_enabled = authenticated_idle
         for widget in (
@@ -2005,7 +2081,11 @@ def _format_purge(summary: PurgeSummary, tr) -> str:
 
 def main() -> int:
     app = QApplication(sys.argv)
+    _apply_application_style(app)
+    icon = QIcon(str(_resource_path(APP_ICON_PATH)))
+    app.setWindowIcon(icon)
     window = MainWindow()
+    window.setWindowIcon(icon)
     window.show()
     return app.exec()
 

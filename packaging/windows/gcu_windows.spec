@@ -7,6 +7,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 block_cipher = None
 project_root = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
+icon_file = os.path.join(project_root, "assets", "icons", "gcu-icon.ico")
 
 datas = []
 binaries = []
@@ -23,6 +24,11 @@ for package in ("certifi",):
 
 for package in ("garth", "pydantic", "pydantic_core", "annotated_types"):
     datas += collect_data_files(package, include_py_files=True)
+
+datas += [
+    (os.path.join(project_root, "assets", "icons", "gcu-icon.png"), os.path.join("assets", "icons")),
+    (icon_file, os.path.join("assets", "icons")),
+]
 
 
 def app_analysis(script_name):
@@ -63,6 +69,7 @@ gui_exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=icon_file,
 )
 
 cli_exe = EXE(
@@ -81,6 +88,7 @@ cli_exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=icon_file,
 )
 
 coll = COLLECT(

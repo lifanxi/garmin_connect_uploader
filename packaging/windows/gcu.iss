@@ -8,6 +8,9 @@
 #ifndef OutputDir
 #define OutputDir "..\..\dist\installer"
 #endif
+#ifndef IconFile
+#define IconFile "..\..\assets\icons\gcu-icon.ico"
+#endif
 
 [Setup]
 AppId={{7D06156D-CC8B-4325-A31F-E0979D3E0F3D}
@@ -26,6 +29,7 @@ ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\GarminConnectUploader.exe
+SetupIconFile={#IconFile}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
