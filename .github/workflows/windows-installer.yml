@@ -17,6 +17,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Cache packaging virtualenv
+        uses: actions/cache@v4
+        with:
+          path: .packaging-venv
+          key: packaging-venv-${{ runner.os }}-py311-${{ hashFiles('requirements.txt', 'requirements-build.txt') }}
 
       - name: Install Inno Setup
         run: winget install --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements
