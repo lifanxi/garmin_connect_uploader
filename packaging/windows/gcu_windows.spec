@@ -8,6 +8,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 block_cipher = None
 project_root = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 icon_file = os.path.join(project_root, "assets", "icons", "gcu-icon.ico")
+windows_app_id_hook = os.path.join(project_root, "packaging", "windows", "runtime-hooks", "windows_app_id.py")
 
 datas = []
 binaries = []
@@ -40,7 +41,7 @@ def app_analysis(script_name):
         hiddenimports=hiddenimports,
         hookspath=[],
         hooksconfig={},
-        runtime_hooks=[],
+        runtime_hooks=[windows_app_id_hook],
         excludes=["logfire"],
         noarchive=False,
         optimize=0,
