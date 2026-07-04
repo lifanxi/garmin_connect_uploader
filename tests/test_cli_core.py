@@ -255,16 +255,17 @@ class CoreCliTests(unittest.TestCase):
                 {FILE_COLUMN: FakeItem("/tmp/second.CSV"), PLAN_COLUMN: FakeItem(status="skip-token")},
                 {FILE_COLUMN: FakeItem("/tmp/first.CSV"), PLAN_COLUMN: FakeItem(status="upload")},
                 {FILE_COLUMN: FakeItem("/tmp/third.CSV"), PLAN_COLUMN: FakeItem(status="skip-legacy-match")},
-            ]
+            ],
+            visual_order=[2, 0, 1],
         )
 
         self.assertEqual(
             MainWindow._table_files(harness),
-            [Path("/tmp/second.CSV"), Path("/tmp/first.CSV"), Path("/tmp/third.CSV")],
+            [Path("/tmp/third.CSV"), Path("/tmp/second.CSV"), Path("/tmp/first.CSV")],
         )
         self.assertEqual(
             MainWindow._runnable_plan_files(harness),
-            [Path("/tmp/first.CSV"), Path("/tmp/third.CSV")],
+            [Path("/tmp/third.CSV"), Path("/tmp/first.CSV")],
         )
 
     def test_gui_points_column_sorts_as_number(self):
@@ -1385,6 +1386,7 @@ class CoreCliTests(unittest.TestCase):
 
 
 class FakeMainWindowHarness:
+    _table_rows_in_view_order = MainWindow._table_rows_in_view_order
     _table_files = MainWindow._table_files
     _runnable_plan_files = MainWindow._runnable_plan_files
 
@@ -1403,14 +1405,28 @@ class FakeItem:
 
 
 class FakeTable:
-    def __init__(self, rows):
+    def __init__(self, rows, visual_order: list[int] | None = None):
         self.rows = rows
+        self.visual_order = visual_order
 
     def rowCount(self):
         return len(self.rows)
 
     def item(self, row, column):
         return self.rows[row].get(column)
+
+    def verticalHeader(self):
+        if self.visual_order is None:
+            return None
+        return FakeVerticalHeader(self.visual_order)
+
+
+class FakeVerticalHeader:
+    def __init__(self, visual_order: list[int]):
+        self.visual_order = visual_order
+
+    def logicalIndex(self, visual_row):
+        return self.visual_order[visual_row]
 
 
 class ConflictGarmin:

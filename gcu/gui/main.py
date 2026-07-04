@@ -1670,7 +1670,7 @@ class MainWindow(QMainWindow):
 
     def _runnable_plan_files(self) -> list[Path]:
         runnable_files = []
-        for row in range(self.files_table.rowCount()):
+        for row in self._table_rows_in_view_order():
             plan_item = self.files_table.item(row, PLAN_COLUMN)
             file_item = self.files_table.item(row, FILE_COLUMN)
             if (
@@ -1684,11 +1684,17 @@ class MainWindow(QMainWindow):
 
     def _table_files(self) -> list[Path]:
         files = []
-        for row in range(self.files_table.rowCount()):
+        for row in self._table_rows_in_view_order():
             item = self.files_table.item(row, FILE_COLUMN)
             if item is not None and item.data(Qt.UserRole):
                 files.append(Path(item.data(Qt.UserRole)))
         return files
+
+    def _table_rows_in_view_order(self) -> list[int]:
+        header = getattr(self.files_table, "verticalHeader", lambda: None)()
+        if header is None or not hasattr(header, "logicalIndex"):
+            return list(range(self.files_table.rowCount()))
+        return [header.logicalIndex(visual_row) for visual_row in range(self.files_table.rowCount())]
 
     def _completed_plan_files(self) -> set[Path]:
         completed_paths = set()
