@@ -22,6 +22,7 @@ from gcu.duplicate.remote_index import RemoteActivityIndex
 from gcu.formats.base import FormatOptions
 from gcu.formats.city_resolver import resolve_display_city
 from gcu.formats.columbus_csv import ColumbusCsvReader
+from gcu.formats.gpx import GpxReader
 from gcu.formats.nmea_rmc import NmeaRmcReader
 from gcu.formats.timezone_resolver import resolve_display_timezone
 from gcu.garmin.client import ACCOUNT_HINT_FILE
@@ -68,6 +69,28 @@ $GPRMC,011056.387,A,3203.7677,N,11848.7043,E,0.81,162.57,230308,,*0F
 
 NMEA_US_TEXT = """$GPRMC,211903.326,A,3716.8900,N,12151.9508,W,60.71,160.62,050911,,*21
 $GPRMC,211908.000,A,3716.8167,N,12151.9176,W,59.06,160.25,050911,,*20
+"""
+
+GPX_TEXT = """<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Unit Test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>sample</name>
+    <trkseg>
+      <trkpt lat="30.2781937" lon="120.1404531">
+        <ele>54</ele>
+        <time>2026-03-19T23:54:27Z</time>
+      </trkpt>
+      <trkpt lat="30.2781823" lon="120.1404645">
+        <ele>55</ele>
+        <time>2026-03-19T23:54:28+00:00</time>
+        <extensions>
+          <speed>1.25</speed>
+          <course>90</course>
+        </extensions>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>
 """
 
 
@@ -490,6 +513,64 @@ class CoreCliTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             NmeaRmcReader().read(path, FormatOptions())
+
+    def test_gpx_reader_parses_track_points(self):
+        path = self._write_file(GPX_TEXT, "track.gpx")
+
+        track_file = GpxReader().read(path, FormatOptions(display_city_name="Hangzhou"))
+        points = track_file.track.points
+
+        self.assertEqual(track_file.source_format, "gpx")
+        self.assertEqual(track_file.track.metadata.source_device, "Unit Test")
+        self.assertEqual(len(points), 2)
+        self.assertEqual(points[0].timestamp_utc, datetime(2026, 3, 19, 23, 54, 27, tzinfo=timezone.utc))
+        self.assertEqual(points[0].altitude_m, 54)
+        self.assertEqual(points[1].speed_mps, 1.25)
+        self.assertEqual(points[1].heading_deg, 90)
+        self.assertEqual(track_file.track.metadata.display_name, "Hangzhou Track Me")
+
+    def test_gpx_reader_accepts_sample_files(self):
+        path = self._write_file(
+            """<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Columbus GPS - http://cbgps.com/" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>sample</name>
+    <trkseg>
+      <trkpt lat="30.2781937" lon="120.1404531"><ele>54</ele><time>2026-03-19T23:54:29Z</time></trkpt>
+      <trkpt lat="30.2781823" lon="120.1404645"><ele>54</ele><time>2026-03-19T23:54:27Z</time></trkpt>
+    </trkseg>
+    <trkseg>
+      <trkpt lat="30.2781753" lon="120.1404522"><ele>53</ele><time>2026-03-19T23:54:28Z</time></trkpt>
+    </trkseg>
+  </trk>
+</gpx>
+""",
+            "sample.GPX",
+        )
+
+        reader = GpxReader()
+        self.assertTrue(reader.can_read(path))
+
+        track_file = reader.read(path, FormatOptions(display_city_name="Hangzhou"))
+
+        self.assertEqual(track_file.source_format, "gpx")
+        self.assertEqual(track_file.track.metadata.source_device, "Columbus GPS - http://cbgps.com/")
+        self.assertEqual(track_file.track.metadata.point_count, 3)
+        self.assertEqual(track_file.track.metadata.display_timezone, "Asia/Shanghai")
+        self.assertEqual(
+            [point.timestamp_utc.second for point in track_file.track.points],
+            [27, 28, 29],
+        )
+
+    def test_format_auto_detects_gpx(self):
+        path = self._write_file(GPX_TEXT, "auto.gpx")
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+
+        self.assertEqual(local_track.track_file.source_format, "gpx")
 
     def test_precheck_reports_duplicate_overlap_and_conflict(self):
         duplicate_a = self._write_csv(CSV_TEXT, name="duplicate-a.CSV")

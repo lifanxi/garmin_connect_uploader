@@ -12,7 +12,7 @@ stable tokens to avoid duplicate uploads.
 
 - Desktop GUI built with PySide6.
 - CLI for scripting, batch sync, conversion, purge, and diagnostics.
-- Columbus CSV and NMEA RMC input support.
+- Columbus CSV, GPX, and NMEA RMC input support.
 - FIT activity generation with a stable tool device signature.
 - Duplicate detection by stable `[gcu:v1:...]` activity-name tokens.
 - Legacy duplicate matching by time, duration, and coordinates.
@@ -42,6 +42,13 @@ CSV timestamps are interpreted as UTC by default.
 Raw text files containing `$GPRMC` or `$GNRMC` sentences are supported. Common
 extensions include `.txt`, `.nmea`, and `.log`. NMEA timestamps are interpreted
 as UTC.
+
+### GPX
+
+Standard GPX track files (`.gpx`, `.GPX`) with `trk/trkseg/trkpt` points are
+supported. Track point `lat`, `lon`, `ele`, and `time` fields are parsed. GPX
+timestamps are interpreted as UTC when they use `Z` or an explicit timezone
+offset.
 
 ## Duplicate And Safety Rules
 
@@ -175,6 +182,7 @@ as well as macOS/Linux shells.
 
 ```bash
 python gcu_cli.py inspect tracks/*.CSV
+python gcu_cli.py inspect tracks/*.gpx
 python gcu_cli.py inspect 080323-UnixCenter.txt --json
 ```
 

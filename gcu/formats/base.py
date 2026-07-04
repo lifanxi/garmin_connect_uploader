@@ -29,9 +29,10 @@ class TrackReader(Protocol):
 
 def get_reader(path: Path, options: FormatOptions) -> TrackReader:
     from .columbus_csv import ColumbusCsvReader
+    from .gpx import GpxReader
     from .nmea_rmc import NmeaRmcReader
 
-    readers: tuple[TrackReader, ...] = (ColumbusCsvReader(), NmeaRmcReader())
+    readers: tuple[TrackReader, ...] = (ColumbusCsvReader(), NmeaRmcReader(), GpxReader())
     if options.explicit_format != "auto":
         for reader in readers:
             if reader.format_id == options.explicit_format:

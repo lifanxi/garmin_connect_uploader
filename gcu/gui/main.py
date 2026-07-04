@@ -188,7 +188,7 @@ TRANSLATIONS = {
         "recursive_add": "Recursive add",
         "add_folder_recursive": "Add subfolders recursively?",
         "add_track_files": "Add track files",
-        "track_files_filter": "Track files (*.CSV *.csv *.txt *.nmea *.log);;All files (*)",
+        "track_files_filter": "Track files (*.CSV *.csv *.gpx *.GPX *.txt *.nmea *.log);;All files (*)",
         "add_folder_title": "Add folder",
         "checking_files": "Checking files",
         "stopping_check": "Stopping check",
@@ -348,7 +348,7 @@ TRANSLATIONS = {
         "recursive_add": "递归添加",
         "add_folder_recursive": "是否递归添加子文件夹中的轨迹文件？",
         "add_track_files": "添加轨迹文件",
-        "track_files_filter": "轨迹文件 (*.CSV *.csv *.txt *.nmea *.log);;所有文件 (*)",
+        "track_files_filter": "轨迹文件 (*.CSV *.csv *.gpx *.GPX *.txt *.nmea *.log);;所有文件 (*)",
         "add_folder_title": "添加文件夹",
         "checking_files": "正在检查文件",
         "stopping_check": "正在中止检查",
@@ -813,7 +813,7 @@ class MainWindow(QMainWindow):
             )
             == QMessageBox.Yes
         )
-        for pattern in ("*.CSV", "*.csv", "*.txt", "*.nmea", "*.log"):
+        for pattern in ("*.CSV", "*.csv", "*.gpx", "*.GPX", "*.txt", "*.nmea", "*.log"):
             if recursive:
                 files.extend(root.rglob(pattern))
             else:
