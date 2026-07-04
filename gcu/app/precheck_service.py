@@ -39,6 +39,9 @@ class PrecheckService:
         file_errors: list[FileCheckError] = []
         canceled = False
         count = len(files)
+        if count == 0:
+            return PrecheckReport(checked_count=0)
+
         for index, path in enumerate(files, start=1):
             if should_cancel is not None and should_cancel():
                 canceled = True
@@ -46,16 +49,32 @@ class PrecheckService:
             if on_file is not None:
                 on_file(index, count, path)
             try:
-                inspected = self.sync_service.inspect([path], options)
-                local_tracks.extend(inspected)
-                if on_track is not None:
-                    for local_track in inspected:
-                        on_track(local_track)
+                inspected = self._inspect_path(path, options)
             except Exception as exc:
                 file_errors.append(FileCheckError(source_path=path, message=_format_file_error(exc)))
-            if should_cancel is not None and should_cancel():
-                canceled = True
-                break
+                continue
+            local_tracks.extend(inspected)
+            if on_track is not None:
+                for local_track in inspected:
+                    on_track(local_track)
+
+        report = self.check_tracks(local_tracks, file_errors=file_errors)
+        if canceled:
+            return PrecheckReport(
+                checked_count=report.checked_count,
+                duplicate_groups=report.duplicate_groups,
+                overlapping_points=report.overlapping_points,
+                conflicting_points=report.conflicting_points,
+                file_errors=report.file_errors,
+                canceled=True,
+            )
+        return report
+
+    def check_tracks(
+        self,
+        local_tracks: list[LocalTrack],
+        file_errors: list[FileCheckError] | tuple[FileCheckError, ...] = (),
+    ) -> PrecheckReport:
         overlapping_points, conflicting_points = self._point_relations(local_tracks)
         return PrecheckReport(
             checked_count=len(local_tracks),
@@ -63,8 +82,11 @@ class PrecheckService:
             overlapping_points=overlapping_points,
             conflicting_points=conflicting_points,
             file_errors=tuple(file_errors),
-            canceled=canceled,
+            canceled=False,
         )
+
+    def _inspect_path(self, path: Path, options: SyncOptions) -> list[LocalTrack]:
+        return self.sync_service.inspect([path], options)
 
     def _duplicate_groups(self, local_tracks: list[LocalTrack]) -> tuple[DuplicateTrackGroup, ...]:
         by_token: dict[str, list[Path]] = defaultdict(list)

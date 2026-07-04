@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from pathlib import Path
 
 from gcu.app.models import Track
+
+
+_FIT_ALTITUDE_SCALE = 5.0
+_FIT_ALTITUDE_OFFSET = 500.0
+_FIT_ALTITUDE_MIN_M = -_FIT_ALTITUDE_OFFSET
+_FIT_ALTITUDE_LEGACY_MAX_M = 65535 / _FIT_ALTITUDE_SCALE - _FIT_ALTITUDE_OFFSET
+
+
+def _safe_altitude_value(altitude_m: float | None) -> float | None:
+    """Return altitude if it can be safely encoded into FIT altitude fields."""
+    if altitude_m is None or not math.isfinite(altitude_m):
+        return None
+
+    # FIT altitude fields use UINT16/UINT32 with scale=5 and offset=500, so the
+    # encoded raw value must be >= 0. Values below -500m become negative and
+    # would make fit-tool reject this record when building the FIT file.
+    if (altitude_m + _FIT_ALTITUDE_OFFSET) * _FIT_ALTITUDE_SCALE < 0:
+        return None
+
+    return altitude_m
 
 
 def write_fit(track: Track, output_path: Path, activity_name: str | None = None) -> Path:
@@ -20,12 +41,14 @@ def write_fit(track: Track, output_path: Path, activity_name: str | None = None)
     except ImportError as exc:
         raise RuntimeError("FIT export requires fit-tool. Install it with: pip install fit-tool") from exc
 
-    if not track.points:
+    points = track.points
+    if not points:
         raise ValueError("Cannot write FIT for an empty track")
 
     metadata = track.metadata
     name = activity_name or metadata.display_name
     builder = FitFileBuilder(auto_define=True)
+    max_speed_mps = 65535 / 1000
 
     file_id = FileIdMessage()
     file_id.type = FileType.ACTIVITY.value
@@ -40,18 +63,27 @@ def write_fit(track: Track, output_path: Path, activity_name: str | None = None)
     creator.hardware_version = 1
     builder.add(creator)
 
-    for point in track.points:
-        record = RecordMessage()
+    add_record = builder.add
+    record_cls = RecordMessage
+    for point in points:
+        record = record_cls()
         record.timestamp = int(point.timestamp_utc.timestamp() * 1000)
         record.position_lat = point.latitude
         record.position_long = point.longitude
-        if point.altitude_m is not None:
-            record.altitude = point.altitude_m
-            record.enhanced_altitude = point.altitude_m
-        if point.speed_mps is not None:
-            record.speed = point.speed_mps
-            record.enhanced_speed = point.speed_mps
-        builder.add(record)
+
+        altitude_m = _safe_altitude_value(point.altitude_m)
+        if altitude_m is not None:
+            record.enhanced_altitude = altitude_m
+            if _FIT_ALTITUDE_MIN_M <= altitude_m <= _FIT_ALTITUDE_LEGACY_MAX_M:
+                record.altitude = altitude_m
+
+        speed_mps = point.speed_mps
+        if speed_mps is not None:
+            if 0 <= speed_mps <= max_speed_mps:
+                record.speed = speed_mps
+            else:
+                record.enhanced_speed = speed_mps
+        add_record(record)
 
     start_ms = int(metadata.start_time_utc.timestamp() * 1000)
     end_ms = int(metadata.end_time_utc.timestamp() * 1000)

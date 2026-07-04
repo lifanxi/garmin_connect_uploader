@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from requests import Response
 from requests import Session
 from requests import Request
 
-from gcu.app.models import RemoteActivity, SyncDecision, UploadResult
+from gcu.app.models import FileCheckError, RemoteActivity, SyncDecision, UploadResult
 from gcu.app.models import TrackPoint
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
@@ -23,13 +24,32 @@ from gcu.formats.city_resolver import resolve_display_city
 from gcu.formats.columbus_csv import ColumbusCsvReader
 from gcu.formats.nmea_rmc import NmeaRmcReader
 from gcu.formats.timezone_resolver import resolve_display_timezone
+from gcu.garmin.client import ACCOUNT_HINT_FILE
 from gcu.garmin.client import _classify_upload_error
 from gcu.garmin.client import _extract_email
 from gcu.garmin.client import GARMIN_WEB_USER_AGENT, GarminClient
 from gcu.garmin.errors import DuplicateUploadError, UploadConsentRequiredError
 from gcu.garmin.signature import GCU_DEVICE_ID, GCU_MANUFACTURER
 from gcu.garmin.verbose_http import configure_verbose_http_logging
-from gcu.gui.main import TRANSLATIONS, _format_decision_summary, _friendly_error_message, _localized_plan_status
+import gcu.gui.main as gui_main
+from gcu.gui.main import MainWindow
+from gcu.gui.main import (
+    FILE_COLUMN,
+    PLAN_COLUMN,
+    PLAN_STATUS_ROLE,
+    POINTS_COLUMN,
+    SortableTableItem,
+    TRANSLATIONS,
+    _decision_display_name,
+    _format_decision_summary,
+    _friendly_error_message,
+    _localized_decision_message,
+    _localized_plan_status,
+    _load_saved_domain,
+    _normalize_domain,
+    _numeric_sort_value,
+    _save_saved_domain,
+)
 
 
 CSV_TEXT = """INDEX,TAG,DATE,TIME,LATITUDE N/S,LONGITUDE E/W,HEIGHT,SPEED,HEADING
@@ -51,6 +71,48 @@ $GPRMC,211908.000,A,3716.8167,N,12151.9176,W,59.06,160.25,050911,,*20
 
 
 class CoreCliTests(unittest.TestCase):
+    def test_gui_persists_session_domain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session_dir = Path(directory)
+
+            self.assertIsNone(_load_saved_domain(session_dir))
+            (session_dir / ACCOUNT_HINT_FILE).write_text('{"login_username": "person@example.com"}', encoding="utf-8")
+            _save_saved_domain("garmin.com", session_dir)
+            self.assertEqual(_load_saved_domain(session_dir), "garmin.com")
+            self.assertEqual(
+                (session_dir / ACCOUNT_HINT_FILE).read_text(encoding="utf-8"),
+                '{\n  "domain": "garmin.com",\n  "login_username": "person@example.com"\n}',
+            )
+
+            _save_saved_domain("garmin.cn", session_dir)
+            self.assertEqual(_load_saved_domain(session_dir), "garmin.cn")
+
+            self.assertEqual(_normalize_domain("garmin.com"), "garmin.com")
+            self.assertIsNone(_normalize_domain("example.com"))
+
+    def test_gui_reads_legacy_session_domain_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session_dir = Path(directory)
+            session_dir.mkdir(exist_ok=True)
+            (session_dir / "gcu_session.json").write_text('{"domain": "garmin.com"}', encoding="utf-8")
+
+            self.assertEqual(_load_saved_domain(session_dir), "garmin.com")
+
+            _save_saved_domain("garmin.cn", session_dir)
+            self.assertFalse((session_dir / "gcu_session.json").exists())
+            self.assertEqual(_load_saved_domain(session_dir), "garmin.cn")
+
+    def test_gui_ignores_invalid_session_domain_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session_dir = Path(directory)
+            session_dir.mkdir(exist_ok=True)
+
+            (session_dir / ACCOUNT_HINT_FILE).write_text("{bad json", encoding="utf-8")
+            self.assertIsNone(_load_saved_domain(session_dir))
+
+            (session_dir / ACCOUNT_HINT_FILE).write_text('{"domain": "example.com"}', encoding="utf-8")
+            self.assertIsNone(_load_saved_domain(session_dir))
+
     def test_gui_error_summary_keeps_traceback_as_detail(self):
         def tr(key):
             return {
@@ -94,6 +156,83 @@ class CoreCliTests(unittest.TestCase):
             _format_decision_summary(decisions, tr, plan=True),
             "已完成 5 个轨迹任务计划，其中上传 1 条，跳过 1 条，补填Token 1 条，失败 1 条，其它 1 条",
         )
+
+    def test_gui_shows_remote_name_when_decision_has_remote_match(self):
+        remote = RemoteActivity(activity_id=1, activity_name="Current remote name")
+        decision = SyncDecision(
+            source_path=Path("a.CSV"),
+            status="skip-legacy-match",
+            token="[gcu:v1:aaaaaaaaaaaaaaaa]",
+            planned_name="Current remote name [gcu:v1:aaaaaaaaaaaaaaaa]",
+            candidates=(remote,),
+        )
+
+        self.assertEqual(_decision_display_name(decision), "Current remote name")
+
+    def test_gui_shows_planned_name_when_decision_has_no_remote_match(self):
+        decision = SyncDecision(
+            source_path=Path("a.CSV"),
+            status="upload",
+            token="[gcu:v1:aaaaaaaaaaaaaaaa]",
+            planned_name="Local planned name [gcu:v1:aaaaaaaaaaaaaaaa]",
+        )
+
+        self.assertEqual(_decision_display_name(decision), "Local planned name [gcu:v1:aaaaaaaaaaaaaaaa]")
+
+    def test_gui_localizes_known_decision_messages(self):
+        tr = lambda key, **kwargs: TRANSLATIONS["zh"][key].format(**kwargs) if kwargs else TRANSLATIONS["zh"][key]
+
+        self.assertEqual(_localized_decision_message("uploaded and tagged", tr), "已上传并完成标记")
+        self.assertEqual(
+            _localized_decision_message("uploaded; activity unavailable after 35s, not tagged", tr),
+            "已上传，但 35 秒后仍无法获取 Garmin 活动，未完成标记",
+        )
+        self.assertEqual(
+            _localized_decision_message("ValueError: bad data", tr),
+            "ValueError: bad data",
+        )
+
+    def test_gui_uses_current_table_order_for_check_and_run(self):
+        harness = FakeMainWindowHarness()
+        harness.files_table = FakeTable(
+            [
+                {FILE_COLUMN: FakeItem("/tmp/second.CSV"), PLAN_COLUMN: FakeItem(status="skip-token")},
+                {FILE_COLUMN: FakeItem("/tmp/first.CSV"), PLAN_COLUMN: FakeItem(status="upload")},
+                {FILE_COLUMN: FakeItem("/tmp/third.CSV"), PLAN_COLUMN: FakeItem(status="skip-legacy-match")},
+            ]
+        )
+
+        self.assertEqual(
+            MainWindow._table_files(harness),
+            [Path("/tmp/second.CSV"), Path("/tmp/first.CSV"), Path("/tmp/third.CSV")],
+        )
+        self.assertEqual(
+            MainWindow._runnable_plan_files(harness),
+            [Path("/tmp/first.CSV"), Path("/tmp/third.CSV")],
+        )
+
+    def test_gui_points_column_sorts_as_number(self):
+        small = SortableTableItem("20")
+        large = SortableTableItem("100")
+        small.setData(gui_main.Qt.UserRole + 2, _numeric_sort_value(POINTS_COLUMN, "20"))
+        large.setData(gui_main.Qt.UserRole + 2, _numeric_sort_value(POINTS_COLUMN, "100"))
+
+        self.assertLess(small, large)
+
+    def test_gui_sortable_table_item_handles_empty_numeric_cells(self):
+        empty = SortableTableItem("")
+        number = SortableTableItem("20")
+        empty.setData(gui_main.Qt.UserRole + 2, _numeric_sort_value(POINTS_COLUMN, ""))
+        number.setData(gui_main.Qt.UserRole + 2, _numeric_sort_value(POINTS_COLUMN, "20"))
+
+        self.assertLess(number, empty)
+        self.assertFalse(empty < number)
+
+    def test_gui_sortable_table_item_compares_text_without_qt_fallback(self):
+        first = SortableTableItem("a-file.csv")
+        second = SortableTableItem("b-file.csv")
+
+        self.assertLess(first, second)
 
     def test_garmin_client_overrides_garth_user_agent(self):
         client = GarminClient(domain="garmin.cn")
@@ -194,6 +333,21 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(user.username, "13800138000")
         self.assertEqual(user.email, "person@example.com")
 
+    def test_account_hint_preserves_saved_domain(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        session_dir = Path(directory.name)
+        session_dir.mkdir(exist_ok=True)
+        (session_dir / ACCOUNT_HINT_FILE).write_text('{"domain": "garmin.com"}', encoding="utf-8")
+        client = GarminClient(domain="garmin.com", session_dir=session_dir)
+
+        client._save_account_hint("person@example.com")
+
+        self.assertEqual(
+            json.loads((session_dir / ACCOUNT_HINT_FILE).read_text(encoding="utf-8")),
+            {"domain": "garmin.com", "login_username": "person@example.com"},
+        )
+
     def test_extract_email_accepts_common_profile_keys(self):
         self.assertEqual(_extract_email({"emailAddress": "person@example.com"}), "person@example.com")
         self.assertEqual(_extract_email({"userName": "13800138000"}), "")
@@ -244,16 +398,37 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertEqual(resolve_display_timezone(points, "auto"), "Asia/Tokyo")
 
-    def test_auto_display_city_uses_middle_segment_majority(self):
+    def test_auto_display_city_uses_progressive_segment_majority(self):
         start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
         points = (
-            TrackPoint(start, 35.0, 139.0),
+            TrackPoint(start, 35.6895, 139.6917),
+            TrackPoint(start + timedelta(minutes=15), 32.06, 118.81),
             TrackPoint(start + timedelta(minutes=30), 32.06, 118.81),
-            TrackPoint(start + timedelta(minutes=31), 32.06, 118.81),
+            TrackPoint(start + timedelta(minutes=45), 32.06, 118.81),
             TrackPoint(start + timedelta(minutes=60), 37.28, -121.86),
         )
 
         self.assertEqual(resolve_display_city(points, "auto"), "Nanjing")
+
+    def test_auto_display_city_uses_start_city_when_end_matches_start(self):
+        start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
+        points = (
+            TrackPoint(start, 35.6895, 139.6917),
+            TrackPoint(start + timedelta(minutes=30), 32.06, 118.81),
+            TrackPoint(start + timedelta(minutes=60), 35.6895, 139.6917),
+        )
+
+        self.assertEqual(resolve_display_city(points, "auto"), "Tokyo")
+
+    def test_auto_display_city_falls_back_to_start_when_no_city_wins(self):
+        start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
+        points = (
+            TrackPoint(start, 35.6895, 139.6917),
+            TrackPoint(start + timedelta(minutes=30), 32.06, 118.81),
+            TrackPoint(start + timedelta(minutes=60), 37.28, -121.86),
+        )
+
+        self.assertEqual(resolve_display_city(points, "auto"), "Tokyo")
 
     def test_nmea_rmc_reader_parses_utc_time_and_coordinates(self):
         path = self._write_file(NMEA_TEXT, "track.txt")
@@ -349,6 +524,252 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(len(report.file_errors), 1)
         self.assertEqual(report.file_errors[0].source_path, bad)
         self.assertIn("Could not detect track format", report.file_errors[0].message)
+
+    def test_precheck_check_tracks_does_not_reinspect(self):
+        options = SyncOptions(format_options=FormatOptions())
+        duplicate_a = self._write_csv(CSV_TEXT, name="reuse-a.CSV")
+        duplicate_b = self._write_csv(CSV_TEXT, name="reuse-b.CSV")
+        parsed = SyncService().inspect([duplicate_a, duplicate_b], options)
+        service = PrecheckService()
+
+        with patch.object(service.sync_service, "inspect") as inspect_mock:
+            report = service.check_tracks(parsed)
+
+        inspect_mock.assert_not_called()
+        self.assertEqual(report.checked_count, 2)
+        self.assertEqual(len(report.duplicate_groups), 1)
+        self.assertEqual(set(report.duplicate_groups[0].source_paths), {duplicate_a, duplicate_b})
+        self.assertEqual(report.file_errors, ())
+        self.assertFalse(report.canceled)
+
+    def test_precheck_check_tracks_keeps_existing_file_errors(self):
+        options = SyncOptions(format_options=FormatOptions())
+        track_path = self._write_csv(CSV_TEXT, name="reuse-error-a.CSV")
+        parsed = SyncService().inspect([track_path], options)
+        service = PrecheckService()
+        bad_file = self._write_file("not a supported track\n", "reuse-error-b.txt")
+
+        report = service.check_tracks(
+            parsed,
+            file_errors=[FileCheckError(source_path=bad_file, message="mock parse error")],
+        )
+
+        self.assertEqual(report.checked_count, 1)
+        self.assertEqual(len(report.file_errors), 1)
+        self.assertEqual(report.file_errors[0].source_path, bad_file)
+        self.assertEqual(report.file_errors[0].message, "mock parse error")
+
+    def test_precheck_check_tracks_and_check_consistent_on_cache_inputs(self):
+        options = SyncOptions(format_options=FormatOptions())
+        track_path = self._write_csv(CSV_TEXT_SHORT, name="cache-check.CSV")
+        parsed = SyncService().inspect([track_path], options)
+        service = PrecheckService()
+
+        report = service.check_tracks(parsed)
+        second_report = service.check_tracks(parsed)
+
+        self.assertEqual(report.checked_count, second_report.checked_count)
+        self.assertEqual(report.duplicate_groups, second_report.duplicate_groups)
+        self.assertEqual(report.overlapping_points, second_report.overlapping_points)
+        self.assertEqual(report.conflicting_points, second_report.conflicting_points)
+        self.assertEqual(report.file_errors, second_report.file_errors)
+
+    def _new_precheck_task_harness(self):
+        harness = type("PrecheckTaskHarness", (), {})()
+        harness._inspect_cancel_requested = False
+        harness._local_track_cache = {}
+
+        def tr(key: str, **kwargs):
+            templates = {
+                "precheck_local": "Running local pre-check for {count} files",
+                "precheck_file": "Pre-checking file {index}/{count}: {name}",
+                "precheck_issue_summary": "Local pre-check found duplicate, overlap, or conflict issues",
+                "check_stopped": "Check stopped",
+                "using_cached_track": "Using cached parse result: {name}",
+            }
+            text = templates.get(key, key)
+            return text.format(**kwargs) if kwargs else text
+
+        def track_cache_key(path: Path, options_obj: SyncOptions):
+            stat = path.stat()
+            return (stat.st_size, stat.st_mtime_ns, options_obj.format_options)
+
+        def cache_local_track(path: Path, options_obj: SyncOptions, track):
+            harness._local_track_cache[path] = (*track_cache_key(path, options_obj), track)
+
+        def cached_local_track(path: Path, options_obj: SyncOptions):
+            cached = harness._local_track_cache.get(path)
+            if cached is None:
+                return None
+            size, mtime_ns, cached_format, track = cached
+            current_size, current_mtime_ns, current_format = track_cache_key(path, options_obj)
+            if (size, mtime_ns, cached_format) == (current_size, current_mtime_ns, current_format):
+                return track
+            harness._local_track_cache.pop(path, None)
+            return None
+
+        harness.tr = tr
+        harness._cache_local_track = cache_local_track
+        harness._cached_local_track = cached_local_track
+        return harness
+
+    def test_precheck_task_reuses_parsed_cache_between_checks(self):
+        first = self._write_csv(CSV_TEXT, name="reuse-cache-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="reuse-cache-b.CSV")
+        options = SyncOptions(format_options=FormatOptions())
+        events_first = []
+        events_second = []
+        harness = self._new_precheck_task_harness()
+        task = MainWindow._precheck_task.__get__(harness, MainWindow)
+
+        class TrackingSyncService(SyncService):
+            inspect_calls = 0
+
+            def inspect(self, files, options):
+                self.__class__.inspect_calls += 1
+                return super().inspect(files, options)
+
+        TrackingSyncService.inspect_calls = 0
+        with patch.object(gui_main, "SyncService", TrackingSyncService):
+            task(
+                [first, second],
+                options,
+                "Running local pre-check for {count} files",
+                "Pre-checking file {index}/{count}: {name}",
+                "Local pre-check passed",
+                "Local pre-check found duplicate, overlap, or conflict issues",
+                events_first.append,
+            )
+            self.assertEqual(TrackingSyncService.inspect_calls, 2)
+
+            task(
+                [first, second],
+                options,
+                "Running local pre-check for {count} files",
+                "Pre-checking file {index}/{count}: {name}",
+                "Local pre-check passed",
+                "Local pre-check found duplicate, overlap, or conflict issues",
+                events_second.append,
+            )
+            self.assertEqual(TrackingSyncService.inspect_calls, 2)
+
+        self.assertEqual(len([event for event in events_first if event[0] == "track"]), 2)
+        self.assertEqual(len([event for event in events_second if event[0] == "track"]), 2)
+        self.assertEqual(
+            [event for event in events_second if event[0] == "log" and event[1].startswith("Using cached parse result")],
+            [
+                ("log", "Using cached parse result: reuse-cache-a.CSV"),
+                ("log", "Using cached parse result: reuse-cache-b.CSV"),
+            ],
+        )
+
+    def test_precheck_task_reprocesses_modified_file_only(self):
+        first = self._write_csv(CSV_TEXT, name="modify-cache-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="modify-cache-b.CSV")
+        options = SyncOptions(format_options=FormatOptions())
+        events_after_modify = []
+        harness = self._new_precheck_task_harness()
+        task = MainWindow._precheck_task.__get__(harness, MainWindow)
+
+        class TrackingSyncService(SyncService):
+            inspect_calls = 0
+
+            def inspect(self, files, options):
+                self.__class__.inspect_calls += 1
+                return super().inspect(files, options)
+
+        TrackingSyncService.inspect_calls = 0
+        with patch.object(gui_main, "SyncService", TrackingSyncService):
+            task(
+                [first, second],
+                options,
+                "Running local pre-check for {count} files",
+                "Pre-checking file {index}/{count}: {name}",
+                "Local pre-check passed",
+                "Local pre-check found duplicate, overlap, or conflict issues",
+                lambda e: None,
+            )
+            self.assertEqual(TrackingSyncService.inspect_calls, 2)
+
+            first.write_text(f"{CSV_TEXT}\n", encoding="utf-8")
+
+            task(
+                [first, second],
+                options,
+                "Running local pre-check for {count} files",
+                "Pre-checking file {index}/{count}: {name}",
+                "Local pre-check passed",
+                "Local pre-check found duplicate, overlap, or conflict issues",
+                events_after_modify.append,
+            )
+            self.assertEqual(TrackingSyncService.inspect_calls, 3)
+
+        self.assertTrue(any(event == ("log", "Using cached parse result: modify-cache-b.CSV") for event in events_after_modify))
+        self.assertFalse(any(event == ("log", "Using cached parse result: modify-cache-a.CSV") for event in events_after_modify))
+
+    def test_precheck_task_reuses_cached_tracks_when_file_list_changes(self):
+        first = self._write_csv(CSV_TEXT, name="relist-cache-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="relist-cache-b.CSV")
+        third = self._write_csv(CSV_TEXT_SHORT, name="relist-cache-c.CSV")
+        options = SyncOptions(format_options=FormatOptions())
+        events_second = []
+        harness = self._new_precheck_task_harness()
+        task = MainWindow._precheck_task.__get__(harness, MainWindow)
+
+        class TrackingSyncService(SyncService):
+            inspect_calls = 0
+
+            def inspect(self, files, options):
+                self.__class__.inspect_calls += 1
+                return super().inspect(files, options)
+
+        TrackingSyncService.inspect_calls = 0
+        with patch.object(gui_main, "SyncService", TrackingSyncService):
+            task(
+                [first, second],
+                options,
+                "Running local pre-check for {count} files",
+                "Pre-checking file {index}/{count}: {name}",
+                "Local pre-check passed",
+                "Local pre-check found duplicate, overlap, or conflict issues",
+                lambda e: None,
+            )
+            self.assertEqual(TrackingSyncService.inspect_calls, 2)
+
+            task(
+                [second, third],
+                options,
+                "Running local pre-check for {count} files",
+                "Pre-checking file {index}/{count}: {name}",
+                "Local pre-check passed",
+                "Local pre-check found duplicate, overlap, or conflict issues",
+                events_second.append,
+            )
+            self.assertEqual(TrackingSyncService.inspect_calls, 3)
+
+        self.assertEqual(
+            [event for event in events_second if event[0] == "log" and event[1].startswith("Using cached parse result")],
+            [
+                ("log", "Using cached parse result: relist-cache-b.CSV"),
+            ],
+        )
+
+    def test_directory_without_subdirs_does_not_require_recursive_prompt(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "file.txt").write_text("abc", encoding="utf-8")
+
+        self.assertFalse(MainWindow._directory_has_children(root))
+
+    def test_directory_with_subdirs_requires_recursive_prompt(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "file.txt").write_text("abc", encoding="utf-8")
+        (root / "nested").mkdir()
+
+        self.assertTrue(MainWindow._directory_has_children(root))
 
     def test_precheck_can_be_canceled_between_files(self):
         first = self._write_csv(CSV_TEXT, name="cancel-a.CSV")
@@ -496,6 +917,25 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(decisions[0].status, "skip-legacy-match")
         self.assertEqual(decisions[0].planned_name, local_track.planned_name)
 
+    def test_legacy_match_with_existing_token_is_skipped(self):
+        path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
+        metadata = local_track.track_file.track.metadata
+        remote = RemoteActivity(
+            activity_id=657,
+            activity_name=f"Hangzhou Track Me {local_track.token}",
+            begin_timestamp_ms=int(metadata.start_time_utc.timestamp() * 1000),
+            start_latitude=metadata.start_latitude,
+            start_longitude=metadata.start_longitude,
+            duration_s=metadata.duration_s,
+        )
+        garmin = ExistingActivityGarmin(remote)
+
+        decisions = SyncService().sync([path], garmin, SyncOptions(format_options=FormatOptions(), dry_run=True))
+
+        self.assertEqual(decisions[0].status, "skip-token")
+        self.assertEqual(decisions[0].activity_id, 657)
+
     def test_sync_uploads_larger_tracks_first(self):
         long_path = self._write_csv(CSV_TEXT, name="long.CSV")
         short_path = self._write_csv(CSV_TEXT_SHORT, name="short.CSV")
@@ -507,6 +947,18 @@ class CoreCliTests(unittest.TestCase):
         service.sync([short_path, long_path], garmin, options)
 
         self.assertEqual(garmin.updated_names[0], long_name)
+
+    def test_sync_can_preserve_input_upload_order(self):
+        long_path = self._write_csv(CSV_TEXT, name="long.CSV")
+        short_path = self._write_csv(CSV_TEXT_SHORT, name="short.CSV")
+        service = SyncService()
+        options = SyncOptions(format_options=FormatOptions(), sort_for_upload=False)
+        short_name = service.inspect([short_path], options)[0].planned_name
+        garmin = ImmediateUploadGarmin()
+
+        service.sync([short_path, long_path], garmin, options)
+
+        self.assertEqual(garmin.updated_names[0], short_name)
 
     def test_sync_continues_after_single_upload_exception(self):
         first = self._write_csv(CSV_TEXT, name="upload-fails.CSV")
@@ -561,7 +1013,7 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual([decision.status for decision in decisions], ["upload", "skip-token"])
         self.assertEqual(decisions[1].message, "duplicate local track in same batch")
 
-    def test_unsigned_remote_token_does_not_skip_upload(self):
+    def test_remote_token_match_has_priority_over_signature(self):
         path = self._write_csv(CSV_TEXT)
         local_track = SyncService().inspect([path], SyncOptions(format_options=FormatOptions()))[0]
         remote = RemoteActivity(
@@ -574,7 +1026,8 @@ class CoreCliTests(unittest.TestCase):
 
         decisions = SyncService().sync([path], garmin, SyncOptions(format_options=FormatOptions(), dry_run=True))
 
-        self.assertEqual(decisions[0].status, "upload")
+        self.assertEqual(decisions[0].status, "skip-token")
+        self.assertEqual(decisions[0].activity_id, 777)
 
     def test_estimated_post_upload_wait_scales_with_point_count(self):
         path = self._write_csv(CSV_TEXT)
@@ -623,6 +1076,29 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertEqual([decision.status for decision in decisions], ["upload", "upload"])
         self.assertLess(garmin.events.index("update:1"), garmin.events.index("upload:2"))
+
+    def test_sync_cancel_stops_before_next_track(self):
+        first = self._write_csv(CSV_TEXT, name="cancel-a.CSV")
+        second = self._write_csv(CSV_TEXT_SHORT, name="cancel-b.CSV")
+        service = SyncService()
+        tracks = service.inspect([first, second], SyncOptions(format_options=FormatOptions()))
+        garmin = SerialOrderGarmin(tracks)
+        decision_count = 0
+
+        def on_decision(_decision):
+            nonlocal decision_count
+            decision_count += 1
+
+        decisions = service.sync_tracks(
+            tracks,
+            garmin,
+            SyncOptions(format_options=FormatOptions()),
+            on_decision=on_decision,
+            should_cancel=lambda: decision_count >= 1,
+        )
+
+        self.assertEqual([decision.status for decision in decisions], ["upload"])
+        self.assertEqual(garmin.events, ["upload:1", "update:1"])
 
     def test_purge_deletes_only_signed_gcu_activities(self):
         signed = RemoteActivity(
@@ -681,6 +1157,36 @@ class CoreCliTests(unittest.TestCase):
         path = Path(directory.name) / name
         path.write_text(text, encoding="utf-8")
         return path
+
+
+class FakeMainWindowHarness:
+    _table_files = MainWindow._table_files
+    _runnable_plan_files = MainWindow._runnable_plan_files
+
+
+class FakeItem:
+    def __init__(self, file_path: str | None = None, status: str | None = None):
+        self.file_path = file_path
+        self.status = status
+
+    def data(self, role):
+        if role == gui_main.Qt.UserRole:
+            return self.file_path
+        if role == PLAN_STATUS_ROLE:
+            return self.status
+        return None
+
+
+class FakeTable:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def rowCount(self):
+        return len(self.rows)
+
+    def item(self, row, column):
+        return self.rows[row].get(column)
+
 
 class ConflictGarmin:
     def __init__(self, remote: RemoteActivity):

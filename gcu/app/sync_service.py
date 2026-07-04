@@ -11,6 +11,7 @@ from typing import Any, Callable, Protocol
 from gcu.app.models import LocalTrack, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision
 from gcu.app.naming import planned_activity_name
 from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
+from gcu.duplicate.fingerprint import extract_token
 from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
 from gcu.duplicate.remote_index import RemoteActivityIndex
 from gcu.export.fit_writer import write_fit
@@ -34,6 +35,7 @@ class GarminGateway(Protocol):
 
 
 ProgressCallback = Callable[[str, LocalTrack, dict[str, Any]], None]
+CancelCallback = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class SyncOptions:
     post_upload_wait_base_s: int = 30
     post_upload_wait_per_1000_points_s: int = 5
     post_upload_max_wait_s: int = 180
+    sort_for_upload: bool = True
 
 
 class SyncService:
@@ -77,9 +80,10 @@ class SyncService:
         options: SyncOptions,
         on_decision: Callable[[SyncDecision], None] | None = None,
         on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCallback | None = None,
     ) -> list[SyncDecision]:
         local_tracks = self.inspect(files, options)
-        return self.sync_tracks(local_tracks, garmin, options, on_decision, on_progress)
+        return self.sync_tracks(local_tracks, garmin, options, on_decision, on_progress, should_cancel)
 
     def sync_tracks(
         self,
@@ -88,16 +92,20 @@ class SyncService:
         options: SyncOptions,
         on_decision: Callable[[SyncDecision], None] | None = None,
         on_progress: ProgressCallback | None = None,
+        should_cancel: CancelCallback | None = None,
     ) -> list[SyncDecision]:
         if not local_tracks:
             return []
-        local_tracks = self._sort_for_upload(local_tracks)
+        if options.sort_for_upload:
+            local_tracks = self._sort_for_upload(local_tracks)
         start_date, end_date = self._query_window(local_tracks)
         index = RemoteActivityIndex.build(garmin.list_activities(start_date, end_date))
         decisions: list[SyncDecision] = []
         processed_tokens: dict[str, int | None] = {}
 
         for local_track in local_tracks:
+            if should_cancel is not None and should_cancel():
+                break
             self._emit_progress(on_progress, "planning", local_track)
             if local_track.token in processed_tokens:
                 self._append_decision(
@@ -132,6 +140,7 @@ class SyncService:
                         planned_name=decision.planned_name,
                         activity_id=decision.activity_id,
                         message="token added to existing activity",
+                        candidates=decision.candidates,
                     ),
                     on_decision,
                 )
@@ -258,6 +267,7 @@ class SyncService:
                         planned_name=local_track.planned_name,
                         activity_id=existing.activity_id,
                         message="token already exists",
+                        candidates=(existing,),
                     )
                 )
                 continue
@@ -275,6 +285,7 @@ class SyncService:
                         planned_name=new_name,
                         activity_id=match.activity_id,
                         message="token backfilled" if not options.dry_run else "would backfill token",
+                        candidates=(match,),
                     )
                 )
             elif len(matches) > 1:
@@ -388,12 +399,23 @@ class SyncService:
                 planned_name=local_track.planned_name,
                 activity_id=token_match.activity_id,
                 message="remote token match",
+                candidates=(token_match,),
             )
 
         legacy_matches = find_legacy_matches(local_track, index, options.match_options)
         if len(legacy_matches) == 1:
             match = legacy_matches[0]
             new_name = self._legacy_backfill_name(local_track, match)
+            if extract_token(match.activity_name) == local_track.token or new_name == match.activity_name:
+                return SyncDecision(
+                    source_path=local_track.track_file.source_path,
+                    status="skip-token",
+                    token=local_track.token,
+                    planned_name=local_track.planned_name,
+                    activity_id=match.activity_id,
+                    message="legacy activity already has token",
+                    candidates=(match,),
+                )
             return SyncDecision(
                 source_path=local_track.track_file.source_path,
                 status="skip-legacy-match",
@@ -526,6 +548,7 @@ class SyncService:
                 planned_name=new_name,
                 activity_id=match.activity_id,
                 message="Garmin reported duplicate; token added to matched activity",
+                candidates=(match,),
             )
         if len(matches) > 1:
             return SyncDecision(

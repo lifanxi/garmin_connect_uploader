@@ -335,7 +335,6 @@ def _date_arg(value: str) -> date:
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid date {value!r}; expected YYYY-MM-DD") from exc
 
-
 def _exit_code(decisions) -> int:
     failure_statuses = {"failed", "ambiguous", "upload-conflict"}
     return 2 if any(item.status in failure_statuses for item in decisions) else 0

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from datetime import timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -21,37 +20,65 @@ def resolve_display_city(
     if not points:
         return None
 
-    sample = _middle_sample(points, sample_minutes)
-    sample = _thin_sample(sample, max_sample_points)
+    sample_minutes  # Kept for compatibility with existing callers.
+    max_sample_points  # Kept for compatibility with existing callers.
+
+    return _resolve_by_progressive_segments(points, min_population)
+
+
+def _resolve_by_progressive_segments(points: tuple[TrackPoint, ...], min_population: int) -> str | None:
+    start_city = _city_for_point(points[0], min_population)
+    end_city = _city_for_point(points[-1], min_population)
+    if start_city == end_city:
+        return start_city
+
+    sampled_indexes = {0, len(points) - 1}
     votes: Counter[str] = Counter()
-    for point in sample:
-        city = _nearest_city(point.latitude, point.longitude, min_population)
-        if city:
-            votes[city] += 1
+    _add_vote(votes, start_city)
+    _add_vote(votes, end_city)
+
+    while True:
+        winner = _unique_winner(votes)
+        if winner:
+            return winner
+
+        new_indexes = _segment_midpoint_indexes(sampled_indexes)
+        new_indexes = [index for index in new_indexes if index not in sampled_indexes]
+        if not new_indexes:
+            return start_city
+
+        for index in new_indexes:
+            sampled_indexes.add(index)
+            _add_vote(votes, _city_for_point(points[index], min_population))
+
+
+def _segment_midpoint_indexes(sampled_indexes: set[int]) -> list[int]:
+    indexes = sorted(sampled_indexes)
+    midpoints = []
+    for left, right in zip(indexes, indexes[1:]):
+        if right - left > 1:
+            midpoints.append((left + right) // 2)
+    return midpoints
+
+
+def _unique_winner(votes: Counter[str]) -> str | None:
     if not votes:
         return None
-    return votes.most_common(1)[0][0]
+    ranked = votes.most_common()
+    if len(ranked) == 1:
+        return ranked[0][0]
+    if ranked[0][1] > ranked[1][1]:
+        return ranked[0][0]
+    return None
 
 
-def _middle_sample(points: tuple[TrackPoint, ...], sample_minutes: int) -> list[TrackPoint]:
-    first = points[0].timestamp_utc
-    last = points[-1].timestamp_utc
-    middle = first + ((last - first) / 2)
-    half_window = timedelta(minutes=sample_minutes / 2)
-    start = middle - half_window
-    end = middle + half_window
-    sample = [point for point in points if start <= point.timestamp_utc <= end]
-    if sample:
-        return sample
-    return [min(points, key=lambda point: abs((point.timestamp_utc - middle).total_seconds()))]
+def _add_vote(votes: Counter[str], city: str | None) -> None:
+    if city:
+        votes[city] += 1
 
 
-def _thin_sample(points: list[TrackPoint], max_points: int) -> list[TrackPoint]:
-    if len(points) <= max_points:
-        return points
-    step = (len(points) - 1) / (max_points - 1)
-    indexes = {round(i * step) for i in range(max_points)}
-    return [points[index] for index in sorted(indexes)]
+def _city_for_point(point: TrackPoint, min_population: int) -> str | None:
+    return _nearest_city(point.latitude, point.longitude, min_population)
 
 
 def _nearest_city(latitude: float, longitude: float, min_population: int) -> str | None:

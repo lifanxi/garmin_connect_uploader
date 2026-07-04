@@ -159,7 +159,9 @@ class GarminClient:
             return
         self.session_dir.mkdir(parents=True, exist_ok=True)
         path = self.session_dir / ACCOUNT_HINT_FILE
-        path.write_text(json.dumps({"login_username": login_username}, ensure_ascii=False, indent=2), encoding="utf-8")
+        data = self._load_account_hint()
+        data["login_username"] = login_username
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
     def _load_account_hint(self) -> dict[str, Any]:
         path = self.session_dir / ACCOUNT_HINT_FILE

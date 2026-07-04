@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import sys
 import shutil
 from dataclasses import dataclass
@@ -32,11 +34,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gcu.app.models import AuthenticatedUser, LocalTrack, PrecheckReport, PurgeSummary, SyncDecision
+from gcu.app.models import (
+    AuthenticatedUser,
+    FileCheckError,
+    LocalTrack,
+    PrecheckReport,
+    PurgeSummary,
+    SyncDecision,
+)
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
 from gcu.formats.base import FormatOptions
 from gcu.garmin import GarminClient
+from gcu.garmin.client import ACCOUNT_HINT_FILE
 from gcu.gui.workers import TaskWorker
 
 
@@ -52,6 +62,19 @@ class GarminSettings:
 class InspectBundle:
     report: PrecheckReport
     tracks: list[LocalTrack]
+
+
+class SortableTableItem(QTableWidgetItem):
+    def __lt__(self, other) -> bool:
+        left = self.data(Qt.UserRole + 2)
+        right = other.data(Qt.UserRole + 2)
+        if left is not None or right is not None:
+            if left is None:
+                return False
+            if right is None:
+                return True
+            return left < right
+        return self.text().casefold() < other.text().casefold()
 
 
 class ErrorDialog(QDialog):
@@ -95,6 +118,8 @@ class ErrorDialog(QDialog):
 
 
 SESSION_DIR = Path(".garth_session")
+SESSION_META_FILE = ACCOUNT_HINT_FILE
+LEGACY_SESSION_META_FILE = "gcu_session.json"
 PURGE_CHUNK_DAYS = 366
 FILE_COLUMN = 0
 START_UTC_COLUMN = 1
@@ -107,6 +132,11 @@ FORMAT_COLUMN = 7
 MESSAGE_COLUMN = 8
 ACTIVITY_COLUMN = 9
 TOKEN_COLUMN = 10
+PLAN_STATUS_ROLE = Qt.UserRole + 1
+RUNNABLE_PLAN_STATUSES = {"upload", "skip-legacy-match", "backfilled-token"}
+SUCCESSFUL_TASK_STATUSES = {"upload", "skip-token", "backfilled-token", "upload-conflict"}
+COMPLETED_PLAN_STATUSES = {"skip-token", "backfilled-token", "upload-conflict", "completed"}
+SUPPORTED_DOMAINS = {"garmin.com", "garmin.cn"}
 
 
 TRANSLATIONS = {
@@ -129,10 +159,14 @@ TRANSLATIONS = {
         "add_files": "Add Files",
         "add_folder": "Add Folder",
         "remove": "Remove",
+        "clear_completed": "Clear Completed",
         "clear": "Clear",
         "inspect": "Inspect",
         "stop_inspect": "Stop Inspect",
         "run": "Run",
+        "stop_run": "Stop Run",
+        "stopping_run": "Stopping after current file",
+        "run_stopped": "Run stopped after current file.",
         "file": "File",
         "format": "Format",
         "points": "Points",
@@ -140,7 +174,7 @@ TRANSLATIONS = {
         "end_utc": "End UTC",
         "city": "City",
         "token": "Token",
-        "plan": "Plan",
+        "plan": "Status",
         "activity": "Activity",
         "name": "Name",
         "message": "Message",
@@ -149,6 +183,8 @@ TRANSLATIONS = {
         "end": "End",
         "duration": "Duration",
         "delete_matched": "Clean Uploaded Tracks",
+        "recursive_add": "Recursive add",
+        "add_folder_recursive": "Add subfolders recursively?",
         "add_track_files": "Add track files",
         "track_files_filter": "Track files (*.CSV *.csv *.txt *.nmea *.log);;All files (*)",
         "add_folder_title": "Add folder",
@@ -159,12 +195,22 @@ TRANSLATIONS = {
         "precheck_file": "Pre-checking file {index}/{count}: {name}",
         "precheck_ok": "Local pre-check passed",
         "precheck_issue_summary": "Local pre-check found duplicate, overlap, or conflict issues",
+        "plan_file_error": "File Error",
+        "plan_duplicate": "Duplicate",
+        "plan_overlap": "Overlap",
+        "plan_conflict": "Conflict",
+        "precheck_parse_error": "Parse error: {message}",
+        "precheck_duplicate_issue": "Duplicate with {count} other tracks",
+        "precheck_overlap_issue": "Overlaps {count} point pair(s) with {other}",
+        "precheck_conflict_issue": "Conflicts {count} point pair(s) with {other}",
         "inspect_file": "Inspecting file {index}/{count}: {name}",
         "inspect_file_done": "Inspected file {index}/{count}: {name}",
+        "using_cached_track": "Using cached parse result: {name}",
         "connect_garmin": "Connecting to Garmin Connect",
         "query_remote": "Querying remote activities and planning tasks",
         "query_remote_sync": "Querying remote activities and running sync tasks",
-        "sync_file_queued": "Queued for upload task {index}/{count}: {name}",
+        "sync_file_queued": "Queued sync task {index}/{count}: {name}",
+        "no_runnable_plans": "No runnable plans. Inspect files first, then run rows marked Upload or Backfill Token.",
         "synchronizing": "Synchronizing tracks",
         "logging_in": "Logging in",
         "checking_session": "Checking session",
@@ -190,6 +236,9 @@ TRANSLATIONS = {
         "plan_upload_conflict": "Resolve upload conflict",
         "plan_ambiguous": "Needs review",
         "plan_failed": "Failed",
+        "plan_queued": "Queued",
+        "plan_uploading": "Uploading",
+        "plan_completed": "Completed",
         "sync_progress_planning": "Planning task: {name}",
         "sync_progress_write_fit": "Rendering FIT: {name}",
         "sync_progress_upload": "Uploading: {name}",
@@ -197,7 +246,27 @@ TRANSLATIONS = {
         "sync_progress_update_name": "Updating activity name: {name}",
         "sync_progress_backfill_token": "Backfilling Token: {name}",
         "sync_progress_resolve_conflict": "Resolving upload conflict: {name}",
+        "decision_duplicate_local": "Duplicate local track in this batch",
+        "decision_token_added": "Token added to existing activity",
+        "decision_upload_unavailable": "Uploaded, but Garmin activity was unavailable after {wait_s}s; not tagged",
+        "decision_uploaded_tagged": "Uploaded and tagged",
+        "decision_token_exists": "Token already exists",
+        "decision_token_backfilled": "Token backfilled",
+        "decision_would_backfill": "Would backfill Token",
+        "decision_multiple_legacy": "Multiple matching remote activities",
+        "decision_no_matching_remote": "No matching remote activity",
+        "decision_signed_gcu": "Signed GCU activity",
+        "decision_signed_deleted": "Signed GCU activity deleted",
+        "decision_remote_token_match": "Remote Token match",
+        "decision_legacy_has_token": "Matched remote activity already has Token",
+        "decision_legacy_match": "Matched remote activity without Token",
+        "decision_no_duplicate": "No duplicate found",
+        "decision_duplicate_added_token": "Garmin reported duplicate; Token added to matched activity",
+        "decision_duplicate_multiple": "Garmin reported duplicate; multiple remote matches",
+        "decision_duplicate_no_unique": "Garmin reported duplicate; no unique remote match",
         "inspected_files": "Inspected {count} files",
+        "clear_completed_done": "Cleared {count} completed tasks.",
+        "clear_completed_none": "No completed tasks to clear.",
         "no_files_title": "No files",
         "no_files": "Add one or more track files first.",
         "failed": "Failed",
@@ -250,10 +319,14 @@ TRANSLATIONS = {
         "add_files": "添加文件",
         "add_folder": "添加文件夹",
         "remove": "移除",
+        "clear_completed": "清理已完成任务",
         "clear": "清空",
         "inspect": "检查",
         "stop_inspect": "中止检查",
         "run": "运行",
+        "stop_run": "中断运行",
+        "stopping_run": "当前文件完成后将中断运行",
+        "run_stopped": "运行已在当前文件完成后中断。",
         "file": "文件",
         "format": "格式",
         "points": "点数",
@@ -261,7 +334,7 @@ TRANSLATIONS = {
         "end_utc": "结束 UTC",
         "city": "城市",
         "token": "Token",
-        "plan": "计划",
+        "plan": "状态",
         "activity": "活动",
         "name": "名称",
         "message": "消息",
@@ -270,6 +343,8 @@ TRANSLATIONS = {
         "end": "结束",
         "duration": "时长",
         "delete_matched": "清理已上传轨迹",
+        "recursive_add": "递归添加",
+        "add_folder_recursive": "是否递归添加子文件夹中的轨迹文件？",
         "add_track_files": "添加轨迹文件",
         "track_files_filter": "轨迹文件 (*.CSV *.csv *.txt *.nmea *.log);;所有文件 (*)",
         "add_folder_title": "添加文件夹",
@@ -280,12 +355,22 @@ TRANSLATIONS = {
         "precheck_file": "正在做本地合法性检查 {index}/{count}: {name}",
         "precheck_ok": "本地合法性检查通过",
         "precheck_issue_summary": "本地合法性检查发现重复、重叠或冲突问题",
+        "plan_file_error": "文件错误",
+        "plan_duplicate": "重复",
+        "plan_overlap": "重叠",
+        "plan_conflict": "冲突",
+        "precheck_parse_error": "解析错误: {message}",
+        "precheck_duplicate_issue": "与 {count} 个其他轨迹重复",
+        "precheck_overlap_issue": "与 {other} 重叠 {count} 个点对",
+        "precheck_conflict_issue": "与 {other} 冲突 {count} 个点对",
         "inspect_file": "正在处理文件 {index}/{count}: {name}",
         "inspect_file_done": "文件处理完成 {index}/{count}: {name}",
+        "using_cached_track": "使用已检查结果: {name}",
         "connect_garmin": "正在连接 Garmin Connect",
         "query_remote": "正在查询远端活动并生成任务计划",
         "query_remote_sync": "正在查询远端活动并执行同步任务",
-        "sync_file_queued": "等待同步任务 {index}/{count}: {name}",
+        "sync_file_queued": "已加入同步队列 {index}/{count}: {name}",
+        "no_runnable_plans": "没有可运行的任务计划。请先检查文件，然后运行标记为上传或补填Token的行。",
         "synchronizing": "正在同步轨迹",
         "logging_in": "正在登录",
         "checking_session": "正在检查登录",
@@ -311,6 +396,9 @@ TRANSLATIONS = {
         "plan_upload_conflict": "处理上传冲突",
         "plan_ambiguous": "需人工确认",
         "plan_failed": "失败",
+        "plan_queued": "排队中",
+        "plan_uploading": "上传中",
+        "plan_completed": "完成",
         "sync_progress_planning": "正在判断处理方式: {name}",
         "sync_progress_write_fit": "正在生成 FIT: {name}",
         "sync_progress_upload": "正在上传: {name}",
@@ -318,7 +406,27 @@ TRANSLATIONS = {
         "sync_progress_update_name": "正在更新活动名称: {name}",
         "sync_progress_backfill_token": "正在补填Token: {name}",
         "sync_progress_resolve_conflict": "正在处理上传冲突: {name}",
+        "decision_duplicate_local": "本批次中有相同轨迹",
+        "decision_token_added": "已给已有活动补填 Token",
+        "decision_upload_unavailable": "已上传，但 {wait_s} 秒后仍无法获取 Garmin 活动，未完成标记",
+        "decision_uploaded_tagged": "已上传并完成标记",
+        "decision_token_exists": "远端已存在相同 Token",
+        "decision_token_backfilled": "已补填 Token",
+        "decision_would_backfill": "将补填 Token",
+        "decision_multiple_legacy": "匹配到多个远端活动",
+        "decision_no_matching_remote": "没有匹配的远端活动",
+        "decision_signed_gcu": "已识别为本工具上传的活动",
+        "decision_signed_deleted": "已删除本工具上传的活动",
+        "decision_remote_token_match": "远端 Token 匹配",
+        "decision_legacy_has_token": "匹配的远端活动已包含 Token",
+        "decision_legacy_match": "匹配到未标记 Token 的远端活动",
+        "decision_no_duplicate": "未发现重复",
+        "decision_duplicate_added_token": "Garmin 返回重复，已给匹配活动补填 Token",
+        "decision_duplicate_multiple": "Garmin 返回重复，匹配到多个远端活动",
+        "decision_duplicate_no_unique": "Garmin 返回重复，但没有唯一匹配的远端活动",
         "inspected_files": "已检查 {count} 个文件",
+        "clear_completed_done": "已清理 {count} 个已完成任务。",
+        "clear_completed_none": "没有可清理的已完成任务。",
         "no_files_title": "没有文件",
         "no_files": "请先添加一个或多个轨迹文件。",
         "failed": "失败",
@@ -360,6 +468,50 @@ def _language() -> str:
     return "zh" if name.startswith(("zh_CN", "zh_SG", "zh_Hans")) else "en"
 
 
+def _normalize_domain(domain: str | None) -> str | None:
+    return domain if domain in SUPPORTED_DOMAINS else None
+
+
+def _session_meta_path(session_dir: Path = SESSION_DIR) -> Path:
+    return session_dir / SESSION_META_FILE
+
+
+def _legacy_session_meta_path(session_dir: Path = SESSION_DIR) -> Path:
+    return session_dir / LEGACY_SESSION_META_FILE
+
+
+def _load_session_meta(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_saved_domain(session_dir: Path = SESSION_DIR) -> str | None:
+    domain = _normalize_domain(_load_session_meta(_session_meta_path(session_dir)).get("domain"))
+    if domain:
+        return domain
+    return _normalize_domain(_load_session_meta(_legacy_session_meta_path(session_dir)).get("domain"))
+
+
+def _save_saved_domain(domain: str, session_dir: Path = SESSION_DIR) -> None:
+    domain = _normalize_domain(domain)
+    if not domain:
+        return
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        payload = _load_session_meta(_session_meta_path(session_dir))
+        payload["domain"] = domain
+        _session_meta_path(session_dir).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _legacy_session_meta_path(session_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -369,18 +521,23 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.files: list[Path] = []
         self.local_tracks: list[LocalTrack] = []
+        self._local_track_cache: dict[Path, tuple[int, int, FormatOptions, LocalTrack]] = {}
         self._active_tasks = 0
         self._workers: list[TaskWorker] = []
         self._authenticated = False
         self._sort_after_sync_done = False
         self._inspect_task_running = False
         self._inspect_cancel_requested = False
+        self._sync_task_running = False
+        self._sync_cancel_requested = False
+        self._queued_plan_snapshot: dict[Path, tuple[str, str | None]] = {}
 
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         self.login_page = self._build_login_page()
+        self._restore_saved_domain()
         self.files_page = self._build_files_page()
         self.purge_page = self._build_purge_page()
         self.status_page = self._build_status_page()
@@ -483,7 +640,7 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(False)
         for column in range(self.files_table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.Interactive)
-        self.files_table.setColumnWidth(FILE_COLUMN, _text_column_width(self.files_table, "M" * 25))
+        self.files_table.setColumnWidth(FILE_COLUMN, _text_column_width(self.files_table, "M" * 12))
         self.files_table.setColumnWidth(START_UTC_COLUMN, _text_column_width(self.files_table, "2026-07-02T08:51:58Z"))
         self.files_table.setColumnWidth(END_UTC_COLUMN, _text_column_width(self.files_table, "2026-07-02T08:51:58Z"))
         self.files_table.setColumnWidth(NAME_COLUMN, 280)
@@ -497,14 +654,17 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout()
         self.inspect_button = QPushButton(self.tr("inspect"))
         self.run_button = QPushButton(self.tr("run"))
+        self.clear_completed_button = QPushButton(self.tr("clear_completed"))
         actions.addStretch(1)
         actions.addWidget(self.inspect_button)
         actions.addWidget(self.run_button)
+        actions.addWidget(self.clear_completed_button)
         layout.addLayout(actions)
 
         self.add_files_button.clicked.connect(self._add_files)
         self.add_folder_button.clicked.connect(self._add_folder)
         self.remove_files_button.clicked.connect(self._remove_selected_files)
+        self.clear_completed_button.clicked.connect(self._clear_completed_files)
         self.clear_files_button.clicked.connect(self._clear_files)
         self.inspect_button.clicked.connect(self._inspect_files)
         self.run_button.clicked.connect(self._run_sync)
@@ -556,18 +716,43 @@ class MainWindow(QMainWindow):
             return
         root = Path(folder)
         files = []
+        recursive = self._directory_has_children(root) and (
+            QMessageBox.question(
+                self,
+                self.tr("recursive_add"),
+                self.tr("add_folder_recursive"),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+        )
         for pattern in ("*.CSV", "*.csv", "*.txt", "*.nmea", "*.log"):
-            files.extend(root.glob(pattern))
+            if recursive:
+                files.extend(root.rglob(pattern))
+            else:
+                files.extend(root.glob(pattern))
         self._append_files(sorted(files))
+
+    @staticmethod
+    def _directory_has_children(path: Path) -> bool:
+        try:
+            for entry in path.iterdir():
+                if entry.is_dir():
+                    return True
+        except OSError:
+            return False
+        return False
 
     def _append_files(self, paths) -> None:
         seen = set(self.files)
+        added_paths = []
         for path in paths:
             if path not in seen and path.is_file():
                 self.files.append(path)
                 seen.add(path)
-        self.local_tracks = []
-        self._render_file_paths()
+                added_paths.append(path)
+        if added_paths:
+            self._append_file_rows(added_paths)
 
     def _remove_selected_files(self) -> None:
         selected_paths = set()
@@ -576,13 +761,51 @@ class MainWindow(QMainWindow):
             if item is not None and item.data(Qt.UserRole):
                 selected_paths.add(Path(item.data(Qt.UserRole)))
         if selected_paths:
-            self.files = [path for path in self.files if path not in selected_paths]
-        self.local_tracks = []
-        self._render_file_paths()
+            self._remove_paths_from_table(selected_paths)
+
+    def _clear_completed_files(self) -> None:
+        completed_paths = self._completed_plan_files()
+        if not completed_paths:
+            message = self.tr("clear_completed_none")
+            self.statusBar().showMessage(message)
+            self._append_status_log(message)
+            return
+        removed_count = self._remove_paths_from_table(completed_paths)
+        message = self.tr("clear_completed_done", count=removed_count)
+        self.statusBar().showMessage(message)
+        self._append_status_log(message)
+
+    def _remove_paths_from_table(self, paths: set[Path]) -> int:
+        if not paths:
+            return 0
+        self.files = [path for path in self.files if path not in paths]
+        self.local_tracks = [
+            track
+            for track in self.local_tracks
+            if track.track_file.source_path not in paths
+        ]
+        for path in paths:
+            self._local_track_cache.pop(path, None)
+
+        rows = []
+        for row in range(self.files_table.rowCount()):
+            item = self.files_table.item(row, FILE_COLUMN)
+            if item is not None and item.data(Qt.UserRole) and Path(item.data(Qt.UserRole)) in paths:
+                rows.append(row)
+
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        for row in sorted(rows, reverse=True):
+            self.files_table.removeRow(row)
+        self.files_table.setSortingEnabled(sorting_enabled)
+        if sorting_enabled:
+            self.files_table.sortByColumn(START_UTC_COLUMN, Qt.AscendingOrder)
+        return len(rows)
 
     def _clear_files(self) -> None:
         self.files = []
         self.local_tracks = []
+        self._local_track_cache = {}
         self._render_file_paths()
 
     def _render_file_paths(self) -> None:
@@ -590,6 +813,15 @@ class MainWindow(QMainWindow):
         self.files_table.setSortingEnabled(False)
         self.files_table.setRowCount(len(self.files))
         for row, path in enumerate(self.files):
+            self._set_row(self.files_table, row, [path.name, "", "", "", "", "", "", "", "", "", ""], source_path=path)
+        self.files_table.setSortingEnabled(sorting_enabled)
+
+    def _append_file_rows(self, paths: list[Path]) -> None:
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        for path in paths:
+            row = self.files_table.rowCount()
+            self.files_table.insertRow(row)
             self._set_row(self.files_table, row, [path.name, "", "", "", "", "", "", "", "", "", ""], source_path=path)
         self.files_table.setSortingEnabled(sorting_enabled)
 
@@ -605,7 +837,7 @@ class MainWindow(QMainWindow):
         self._inspect_task_running = True
         self._inspect_cancel_requested = False
         options = self._sync_options(dry_run=True)
-        files = list(self.files)
+        files = self._table_files()
         precheck_local = self.tr("precheck_local", count=len(files))
         precheck_file = self.tr("precheck_file")
         precheck_ok = self.tr("precheck_ok")
@@ -628,12 +860,26 @@ class MainWindow(QMainWindow):
         )
 
     def _run_sync(self) -> None:
+        if self._sync_task_running:
+            self._sync_cancel_requested = True
+            self.run_button.setEnabled(False)
+            self.statusBar().showMessage(self.tr("stopping_run"))
+            self._append_status_log(self.tr("stopping_run"))
+            return
         if not self._require_files():
             return
         self._sort_after_sync_done = False
         options = self._sync_options(dry_run=False)
         settings = self._garmin_settings()
-        files = list(self.files)
+        files = self._runnable_plan_files()
+        if not files:
+            message = self.tr("no_runnable_plans")
+            self.statusBar().showMessage(message)
+            self._append_status_log(message)
+            return
+        self._mark_files_queued(files)
+        self._sync_task_running = True
+        self._sync_cancel_requested = False
         queued_template = self.tr("sync_file_queued")
         connect_garmin = self.tr("connect_garmin")
         query_remote = self.tr("query_remote_sync")
@@ -651,6 +897,7 @@ class MainWindow(QMainWindow):
                 emit,
             ),
             self._on_sync_done,
+            on_error=lambda message: self._on_sync_error(message),
             on_progress=self._on_progress_event,
             pass_progress=True,
         )
@@ -671,7 +918,7 @@ class MainWindow(QMainWindow):
         self._run_task(
             self.tr("logging_in"),
             lambda: self._login_task(settings),
-            lambda user: self._on_login_ok(user, self.tr("login_complete")),
+            lambda user: self._on_login_ok(user, self.tr("login_complete"), settings.domain),
             on_error=lambda message: self._on_login_failed(message),
         )
 
@@ -769,8 +1016,10 @@ class MainWindow(QMainWindow):
         garmin.ensure_session(fallback_username, settings.password or None, allow_prompt=False)
         return garmin.current_user(fallback_username=fallback_username)
 
-    def _on_login_ok(self, user: AuthenticatedUser, message: str) -> None:
+    def _on_login_ok(self, user: AuthenticatedUser, message: str, domain: str | None = None) -> None:
         self._authenticated = True
+        if domain:
+            _save_saved_domain(domain, SESSION_DIR)
         login_name = user.email or user.username
         if login_name:
             self.username_input.setText(login_name)
@@ -813,17 +1062,39 @@ class MainWindow(QMainWindow):
         emit,
     ) -> InspectBundle:
         emit(("log", precheck_local))
+        report: PrecheckReport
         tracks: list[LocalTrack] = []
-        report = PrecheckService().check(
-            files,
-            options,
-            on_file=lambda index, count, path: emit(
-                ("log", precheck_file.format(index=index, count=count, name=path.name))
-            ),
-            on_track=lambda local_track: (tracks.append(local_track), emit(("track", local_track))),
-            should_cancel=lambda: self._inspect_cancel_requested,
-        )
-        if report.canceled:
+        file_errors: list[FileCheckError] = []
+        service = SyncService()
+        count = len(files)
+        canceled = False
+        for index, path in enumerate(files, start=1):
+            if self._inspect_cancel_requested:
+                canceled = True
+                break
+            emit(("log", precheck_file.format(index=index, count=count, name=path.name)))
+            try:
+                local_track = self._cached_local_track(path, options)
+                if local_track is not None:
+                    emit(("log", self.tr("using_cached_track", name=path.name)))
+                else:
+                    local_track = service.inspect([path], options)[0]
+                    self._cache_local_track(path, options, local_track)
+                tracks.append(local_track)
+                emit(("track", local_track))
+            except Exception as exc:
+                file_errors.append(FileCheckError(source_path=path, message=_format_file_exception(exc)))
+                continue
+        report = PrecheckService().check_tracks(tracks, file_errors=file_errors)
+        if canceled:
+            report = PrecheckReport(
+                checked_count=report.checked_count,
+                duplicate_groups=report.duplicate_groups,
+                overlapping_points=report.overlapping_points,
+                conflicting_points=report.conflicting_points,
+                file_errors=report.file_errors,
+                canceled=True,
+            )
             emit(("log", self.tr("check_stopped")))
             return InspectBundle(report=report, tracks=tracks)
         if _precheck_has_issues(report):
@@ -839,23 +1110,102 @@ class MainWindow(QMainWindow):
             return
         if _precheck_has_issues(report):
             self._append_status_log(_format_precheck(report, self.tr))
-            answer = QMessageBox.warning(
-                self,
-                self.tr("precheck_issues"),
-                _format_precheck(report, self.tr) + "\n\n" + self.tr("continue_dry_run"),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                self.statusBar().showMessage(self.tr("inspect_stopped"))
-                self._append_status_log(self.tr("inspect_stopped"))
-                self._inspect_task_running = False
-                self._inspect_cancel_requested = False
-                self._refresh_action_state()
-                return
+            issue_rows = self._mark_precheck_issue_rows(report)
+            for path in issue_rows:
+                self._local_track_cache.pop(path, None)
+        else:
+            issue_rows = set[Path]()
         failed_files = {item.source_path for item in report.file_errors}
-        tracks = [track for track in bundle.tracks if track.track_file.source_path not in failed_files]
+        tracks = [
+            track
+            for track in bundle.tracks
+            if track.track_file.source_path not in issue_rows
+            and track.track_file.source_path not in failed_files
+        ]
+        for path in failed_files:
+            self._local_track_cache.pop(path, None)
+        self.local_tracks = tracks
         self._inspect_and_plan(tracks, options)
+
+    def _mark_precheck_issue_rows(self, report: PrecheckReport) -> set[Path]:
+        issue_files: dict[Path, set[str]] = {}
+        issue_messages: dict[Path, list[str]] = {}
+
+        def _add_issue(path: Path, plan: str, message: str) -> None:
+            plans = issue_files.setdefault(path, set())
+            plans.add(plan)
+            issue_messages.setdefault(path, []).append(message)
+
+        for item in report.file_errors:
+            _add_issue(
+                item.source_path,
+                "file_error",
+                self.tr("precheck_parse_error", message=item.message),
+            )
+
+        for group in report.duplicate_groups:
+            source_paths = list(group.source_paths)
+            other_count = max(0, len(source_paths) - 1)
+            message = self.tr("precheck_duplicate_issue", count=str(other_count))
+            for source_path in source_paths:
+                _add_issue(source_path, "duplicate", message)
+
+        for item in report.overlapping_points:
+            first = item.first_source_path
+            second = item.second_source_path
+            message_first = self.tr(
+                "precheck_overlap_issue",
+                count=str(item.count),
+                other=second.name,
+            )
+            message_second = self.tr(
+                "precheck_overlap_issue",
+                count=str(item.count),
+                other=first.name,
+            )
+            _add_issue(first, "overlap", message_first)
+            _add_issue(second, "overlap", message_second)
+
+        for item in report.conflicting_points:
+            first = item.first_source_path
+            second = item.second_source_path
+            message_first = self.tr(
+                "precheck_conflict_issue",
+                count=str(item.count),
+                other=second.name,
+            )
+            message_second = self.tr(
+                "precheck_conflict_issue",
+                count=str(item.count),
+                other=first.name,
+            )
+            _add_issue(first, "conflict", message_first)
+            _add_issue(second, "conflict", message_second)
+
+        for path, plans in issue_files.items():
+            messages = issue_messages.get(path) or []
+            plan = " / ".join(self._localize_precheck_issue_plan(plan) for plan in self._precheck_issue_plan_order(plans))
+            message = "\n".join(messages)
+            self._update_status_row(path, plan, message)
+        return set(issue_files.keys())
+
+    def _precheck_issue_plan_order(self, plans: set[str]) -> tuple[str, ...]:
+        ordered = []
+        for value in ("file_error", "duplicate", "overlap", "conflict"):
+            if value in plans:
+                ordered.append(value)
+        return tuple(ordered)
+
+    def _localize_precheck_issue_plan(self, plan: str) -> str:
+        if plan == "file_error":
+            return self.tr("plan_file_error")
+        if plan == "duplicate":
+            return self.tr("plan_duplicate")
+        if plan == "overlap":
+            return self.tr("plan_overlap")
+        if plan == "conflict":
+            return self.tr("plan_conflict")
+        return plan
 
     def _inspect_and_plan(self, tracks: list[LocalTrack], options: SyncOptions) -> None:
         settings = self._garmin_settings()
@@ -931,9 +1281,16 @@ class MainWindow(QMainWindow):
         tracks: list[LocalTrack] = []
         failed_decisions: list[SyncDecision] = []
         for index, path in enumerate(files, start=1):
+            if self._sync_cancel_requested:
+                break
             emit(("log", inspect_file.format(index=index, count=count, name=path.name)))
             try:
-                local_track = service.inspect([path], options)[0]
+                local_track = self._cached_local_track(path, options)
+                if local_track is not None:
+                    emit(("log", self.tr("using_cached_track", name=path.name)))
+                else:
+                    local_track = service.inspect([path], options)[0]
+                    self._cache_local_track(path, options, local_track)
             except Exception as exc:
                 decision = SyncDecision(
                     source_path=path,
@@ -959,16 +1316,31 @@ class MainWindow(QMainWindow):
             options,
             on_decision=lambda decision: emit(("decision", decision)),
             on_progress=lambda event, track, details: emit(("sync-progress", (event, track, details))),
+            should_cancel=lambda: self._sync_cancel_requested,
         )
         return failed_decisions + decisions
 
     def _on_sync_done(self, decisions: list[SyncDecision]) -> None:
+        was_canceled = self._sync_cancel_requested
+        self._sync_task_running = False
+        self._sync_cancel_requested = False
+        if was_canceled:
+            self._restore_queued_files()
         message = _format_decision_summary(decisions, self.tr, plan=False)
         self.statusBar().showMessage(message)
         self._append_status_log(message)
+        if was_canceled:
+            self.statusBar().showMessage(self.tr("run_stopped"))
+            self._append_status_log(self.tr("run_stopped"))
         if getattr(self, "_sort_after_sync_done", False):
             self.files_table.sortItems(START_UTC_COLUMN, Qt.AscendingOrder)
             self._sort_after_sync_done = False
+
+    def _on_sync_error(self, message: str) -> None:
+        self._sync_task_running = False
+        self._sync_cancel_requested = False
+        self._queued_plan_snapshot = {}
+        self._show_error(message)
 
     def _on_inspect_plan_done(self, decisions: list[SyncDecision]) -> None:
         if self._inspect_cancel_requested:
@@ -1007,7 +1379,8 @@ class MainWindow(QMainWindow):
             event, track, details = payload
             message = _format_sync_progress(event, track, details, self.tr)
             self._append_status_log(message)
-            self._update_status_row(track.track_file.source_path, message, "")
+            self._mark_file_uploading(track.track_file.source_path)
+            self._update_message_row(track.track_file.source_path, message)
         elif kind == "status":
             path, plan, message = payload
             self._update_status_row(path, plan, message)
@@ -1029,6 +1402,27 @@ class MainWindow(QMainWindow):
         if row is None:
             return
         metadata = track.track_file.track.metadata
+        if self._sync_task_running:
+            sorting_enabled = self.files_table.isSortingEnabled()
+            self.files_table.setSortingEnabled(False)
+            self._set_table_values(
+                self.files_table,
+                row,
+                FILE_COLUMN,
+                [
+                    track.track_file.source_path.name,
+                    _format_utc_millis(metadata.start_time_utc),
+                    _format_utc_millis(metadata.end_time_utc),
+                    metadata.display_city or "",
+                    str(metadata.point_count),
+                ],
+                source_path=track.track_file.source_path,
+            )
+            self._set_table_values(self.files_table, row, FORMAT_COLUMN, [track.track_file.source_format])
+            self._set_table_values(self.files_table, row, TOKEN_COLUMN, [track.token])
+            self.files_table.setSortingEnabled(sorting_enabled)
+            return
+
         self._set_row(
             self.files_table,
             row,
@@ -1054,9 +1448,14 @@ class MainWindow(QMainWindow):
             return
         sorting_enabled = self.files_table.isSortingEnabled()
         self.files_table.setSortingEnabled(False)
-        self._set_table_values(self.files_table, row, PLAN_COLUMN, [_localized_plan_status(decision.status, self.tr)])
-        self._set_table_values(self.files_table, row, NAME_COLUMN, [decision.planned_name])
-        self._set_table_values(self.files_table, row, MESSAGE_COLUMN, [decision.message])
+        plan_text = _localized_plan_status(decision.status, self.tr)
+        plan_status = decision.status
+        if self._sync_task_running and decision.status in SUCCESSFUL_TASK_STATUSES:
+            plan_text = self.tr("plan_completed")
+            plan_status = "completed"
+        self._set_plan_cell(row, plan_text, plan_status)
+        self._set_table_values(self.files_table, row, NAME_COLUMN, [_decision_display_name(decision)])
+        self._set_table_values(self.files_table, row, MESSAGE_COLUMN, [_localized_decision_message(decision.message, self.tr)])
         self._set_table_values(self.files_table, row, ACTIVITY_COLUMN, [str(decision.activity_id or "")])
         self.files_table.setSortingEnabled(sorting_enabled)
 
@@ -1066,9 +1465,99 @@ class MainWindow(QMainWindow):
             return
         sorting_enabled = self.files_table.isSortingEnabled()
         self.files_table.setSortingEnabled(False)
-        self._set_table_values(self.files_table, row, PLAN_COLUMN, [plan])
+        self._set_plan_cell(row, plan)
         self._set_table_values(self.files_table, row, MESSAGE_COLUMN, [message])
         self.files_table.setSortingEnabled(sorting_enabled)
+
+    def _update_message_row(self, path: Path, message: str) -> None:
+        row = self._row_for_path(path)
+        if row is None:
+            return
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        self._set_table_values(self.files_table, row, MESSAGE_COLUMN, [message])
+        self.files_table.setSortingEnabled(sorting_enabled)
+
+    def _mark_files_queued(self, files: list[Path]) -> None:
+        self._queued_plan_snapshot = {}
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        for path in files:
+            row = self._row_for_path(path)
+            if row is not None:
+                plan_item = self.files_table.item(row, PLAN_COLUMN)
+                if plan_item is not None:
+                    self._queued_plan_snapshot[path] = (plan_item.text(), plan_item.data(PLAN_STATUS_ROLE))
+                self._set_plan_cell(row, self.tr("plan_queued"), "queued")
+                self._set_table_values(self.files_table, row, MESSAGE_COLUMN, [""])
+        self.files_table.setSortingEnabled(sorting_enabled)
+
+    def _restore_queued_files(self) -> None:
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        for path, (text, status) in self._queued_plan_snapshot.items():
+            row = self._row_for_path(path)
+            if row is None:
+                continue
+            plan_item = self.files_table.item(row, PLAN_COLUMN)
+            if plan_item is not None and plan_item.data(PLAN_STATUS_ROLE) == "queued":
+                self._set_plan_cell(row, text, status)
+        self.files_table.setSortingEnabled(sorting_enabled)
+        self._queued_plan_snapshot = {}
+
+    def _mark_file_uploading(self, path: Path) -> None:
+        row = self._row_for_path(path)
+        if row is None:
+            return
+        plan_item = self.files_table.item(row, PLAN_COLUMN)
+        if plan_item is not None and plan_item.data(PLAN_STATUS_ROLE) == "completed":
+            return
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        self._set_plan_cell(row, self.tr("plan_uploading"), "uploading")
+        self.files_table.setSortingEnabled(sorting_enabled)
+
+    def _set_plan_cell(self, row: int, text: str, status: str | None = None) -> None:
+        self._set_table_values(self.files_table, row, PLAN_COLUMN, [text])
+        item = self.files_table.item(row, PLAN_COLUMN)
+        if item is not None:
+            item.setData(PLAN_STATUS_ROLE, status)
+
+    def _runnable_plan_files(self) -> list[Path]:
+        runnable_files = []
+        for row in range(self.files_table.rowCount()):
+            plan_item = self.files_table.item(row, PLAN_COLUMN)
+            file_item = self.files_table.item(row, FILE_COLUMN)
+            if (
+                plan_item is not None
+                and file_item is not None
+                and plan_item.data(PLAN_STATUS_ROLE) in RUNNABLE_PLAN_STATUSES
+                and file_item.data(Qt.UserRole)
+            ):
+                runnable_files.append(Path(file_item.data(Qt.UserRole)))
+        return runnable_files
+
+    def _table_files(self) -> list[Path]:
+        files = []
+        for row in range(self.files_table.rowCount()):
+            item = self.files_table.item(row, FILE_COLUMN)
+            if item is not None and item.data(Qt.UserRole):
+                files.append(Path(item.data(Qt.UserRole)))
+        return files
+
+    def _completed_plan_files(self) -> set[Path]:
+        completed_paths = set()
+        for row in range(self.files_table.rowCount()):
+            plan_item = self.files_table.item(row, PLAN_COLUMN)
+            file_item = self.files_table.item(row, FILE_COLUMN)
+            if (
+                plan_item is not None
+                and file_item is not None
+                and plan_item.data(PLAN_STATUS_ROLE) in COMPLETED_PLAN_STATUSES
+                and file_item.data(Qt.UserRole)
+            ):
+                completed_paths.add(Path(file_item.data(Qt.UserRole)))
+        return completed_paths
 
     def _remember_track(self, track: LocalTrack) -> None:
         self.local_tracks = [
@@ -1077,6 +1566,24 @@ class MainWindow(QMainWindow):
             if existing.track_file.source_path != track.track_file.source_path
         ]
         self.local_tracks.append(track)
+
+    def _track_cache_key(self, path: Path, options: SyncOptions) -> tuple[int, int, FormatOptions]:
+        stat = path.stat()
+        return (stat.st_size, stat.st_mtime_ns, options.format_options)
+
+    def _cache_local_track(self, path: Path, options: SyncOptions, track: LocalTrack) -> None:
+        self._local_track_cache[path] = (*self._track_cache_key(path, options), track)
+
+    def _cached_local_track(self, path: Path, options: SyncOptions) -> LocalTrack | None:
+        cached = self._local_track_cache.get(path)
+        if cached is None:
+            return None
+        size, mtime_ns, cached_format, track = cached
+        current_size, current_mtime_ns, current_format = self._track_cache_key(path, options)
+        if (size, mtime_ns, cached_format) == (current_size, current_mtime_ns, current_format):
+            return track
+        self._local_track_cache.pop(path, None)
+        return None
 
     def _row_for_path(self, path: Path) -> int | None:
         normalized = str(path)
@@ -1137,12 +1644,14 @@ class MainWindow(QMainWindow):
             self.add_files_button,
             self.add_folder_button,
             self.remove_files_button,
+            self.clear_completed_button,
             self.clear_files_button,
-            self.run_button,
         ):
             widget.setEnabled(file_controls_enabled)
         self.inspect_button.setEnabled(authenticated_idle or self._inspect_task_running)
         self.inspect_button.setText(self.tr("stop_inspect") if self._inspect_task_running else self.tr("inspect"))
+        self.run_button.setEnabled(authenticated_idle or (self._sync_task_running and not self._sync_cancel_requested))
+        self.run_button.setText(self.tr("stop_run") if self._sync_task_running else self.tr("run"))
 
     def _resize_to_initial_size(self) -> None:
         central = self.centralWidget()
@@ -1163,6 +1672,7 @@ class MainWindow(QMainWindow):
         return SyncOptions(
             format_options=FormatOptions(),
             dry_run=dry_run,
+            sort_for_upload=False,
         )
 
     def _garmin_settings(self) -> GarminSettings:
@@ -1209,8 +1719,11 @@ class MainWindow(QMainWindow):
         table.setSortingEnabled(False)
         for offset, value in enumerate(values):
             column = start_column + offset
-            item = QTableWidgetItem(value)
+            item = SortableTableItem(value)
             item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+            numeric_value = _numeric_sort_value(column, value)
+            if numeric_value is not None:
+                item.setData(Qt.UserRole + 2, numeric_value)
             if source_path is not None and column == FILE_COLUMN:
                 item.setData(Qt.UserRole, str(source_path))
                 item.setToolTip(str(source_path.resolve()))
@@ -1224,18 +1737,24 @@ class MainWindow(QMainWindow):
             return
         event.accept()
 
+    def _restore_saved_domain(self) -> None:
+        domain = _load_saved_domain(SESSION_DIR)
+        if domain == "garmin.com":
+            self.global_domain_radio.setChecked(True)
+        elif domain == "garmin.cn":
+            self.china_domain_radio.setChecked(True)
 
     def _auto_check_session(self) -> None:
         settings = self._garmin_settings()
         self._run_task(
             self.tr("checking_session"),
             lambda: self._status_task(settings),
-            lambda user: self._on_auto_session_ok(user),
+            lambda user: self._on_auto_session_ok(user, settings.domain),
             on_error=lambda message: self._on_auto_session_failed(message),
         )
 
-    def _on_auto_session_ok(self, user: AuthenticatedUser) -> None:
-        self._on_login_ok(user, self.tr("session_usable"))
+    def _on_auto_session_ok(self, user: AuthenticatedUser, domain: str) -> None:
+        self._on_login_ok(user, self.tr("session_usable"), domain)
 
     def _on_auto_session_failed(self, message: str) -> None:
         self._authenticated = False
@@ -1258,6 +1777,15 @@ def _format_activity_timestamp_ms(value: int | None) -> str:
     if value is None:
         return ""
     return datetime.fromtimestamp(value / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _numeric_sort_value(column: int, value: str) -> int | None:
+    if column not in {POINTS_COLUMN, ACTIVITY_COLUMN} or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _format_duration_adaptive(duration_s: float | None) -> str:
@@ -1289,6 +1817,43 @@ def _localized_plan_status(status: str, tr) -> str:
     if status == "failed":
         return tr("plan_failed")
     return status
+
+
+def _decision_display_name(decision: SyncDecision) -> str:
+    if len(decision.candidates) == 1:
+        return decision.candidates[0].activity_name
+    return decision.planned_name
+
+
+def _localized_decision_message(message: str, tr) -> str:
+    fixed = {
+        "duplicate local track in same batch": "decision_duplicate_local",
+        "token added to existing activity": "decision_token_added",
+        "uploaded and tagged": "decision_uploaded_tagged",
+        "token already exists": "decision_token_exists",
+        "token backfilled": "decision_token_backfilled",
+        "would backfill token": "decision_would_backfill",
+        "multiple legacy matches": "decision_multiple_legacy",
+        "no matching remote activity": "decision_no_matching_remote",
+        "signed GCU activity": "decision_signed_gcu",
+        "signed GCU activity deleted": "decision_signed_deleted",
+        "remote token match": "decision_remote_token_match",
+        "legacy activity already has token": "decision_legacy_has_token",
+        "legacy activity match": "decision_legacy_match",
+        "no duplicate found": "decision_no_duplicate",
+        "Garmin reported duplicate; token added to matched activity": "decision_duplicate_added_token",
+        "Garmin reported duplicate; multiple remote matches": "decision_duplicate_multiple",
+        "Garmin reported duplicate; no unique remote match": "decision_duplicate_no_unique",
+    }
+    key = fixed.get(message)
+    if key:
+        return tr(key)
+
+    match = re.fullmatch(r"uploaded; activity unavailable after (?P<wait_s>\d+)s, not tagged", message)
+    if match:
+        return tr("decision_upload_unavailable", wait_s=match.group("wait_s"))
+
+    return message
 
 
 def _format_sync_progress(event: str, track: LocalTrack, details: dict, tr) -> str:
