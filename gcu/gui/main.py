@@ -478,11 +478,18 @@ def _resource_path(relative_path: Path) -> Path:
         candidate = Path(pyinstaller_base) / relative_path
         if candidate.exists():
             return candidate
+    executable_base = Path(sys.executable).resolve().parent
+    candidate = executable_base / "_internal" / relative_path
+    if candidate.exists():
+        return candidate
+    candidate = executable_base / relative_path
+    if candidate.exists():
+        return candidate
     source_base = Path(__file__).resolve().parents[2]
     candidate = source_base / relative_path
     if candidate.exists():
         return candidate
-    return Path(sys.executable).resolve().parent / relative_path
+    return executable_base / relative_path
 
 
 def _set_windows_app_user_model_id() -> None:
