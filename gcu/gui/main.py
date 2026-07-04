@@ -190,7 +190,14 @@ TRANSLATIONS = {
         "recursive_add": "Recursive add",
         "add_folder_recursive": "Add subfolders recursively?",
         "add_track_files": "Add track files",
-        "track_files_filter": "Track files (*.CSV *.csv *.gpx *.GPX *.fit *.FIT *.txt *.nmea *.log);;All files (*)",
+        "track_files_filter": (
+            "All supported track files (*.CSV *.csv *.gpx *.GPX *.fit *.FIT *.txt *.nmea *.log);;"
+            "FIT files (*.fit *.FIT);;"
+            "GPX files (*.gpx *.GPX);;"
+            "CSV files (*.CSV *.csv);;"
+            "NMEA/text files (*.txt *.nmea *.log);;"
+            "All files (*)"
+        ),
         "add_folder_title": "Add folder",
         "checking_files": "Checking files",
         "stopping_check": "Stopping check",
@@ -350,7 +357,14 @@ TRANSLATIONS = {
         "recursive_add": "递归添加",
         "add_folder_recursive": "是否递归添加子文件夹中的轨迹文件？",
         "add_track_files": "添加轨迹文件",
-        "track_files_filter": "轨迹文件 (*.CSV *.csv *.gpx *.GPX *.fit *.FIT *.txt *.nmea *.log);;所有文件 (*)",
+        "track_files_filter": (
+            "所有支持的轨迹文件 (*.CSV *.csv *.gpx *.GPX *.fit *.FIT *.txt *.nmea *.log);;"
+            "FIT 文件 (*.fit *.FIT);;"
+            "GPX 文件 (*.gpx *.GPX);;"
+            "CSV 文件 (*.CSV *.csv);;"
+            "NMEA/文本文件 (*.txt *.nmea *.log);;"
+            "所有文件 (*)"
+        ),
         "add_folder_title": "添加文件夹",
         "checking_files": "正在检查文件",
         "stopping_check": "正在中止检查",
