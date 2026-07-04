@@ -138,6 +138,7 @@ SUCCESSFUL_TASK_STATUSES = {"upload", "skip-token", "backfilled-token", "upload-
 COMPLETED_PLAN_STATUSES = {"skip-token", "backfilled-token", "upload-conflict", "completed"}
 SUPPORTED_DOMAINS = {"garmin.com", "garmin.cn"}
 APP_ICON_PATH = Path("assets/icons/gcu-icon.png")
+APP_USER_MODEL_ID = "LiFanxi.GarminConnectUploader"
 
 
 TRANSLATIONS = {
@@ -480,6 +481,17 @@ def _resource_path(relative_path: Path) -> Path:
     if candidate.exists():
         return candidate
     return Path(sys.executable).resolve().parent / relative_path
+
+
+def _set_windows_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
 def _apply_application_style(app: QApplication) -> None:
@@ -2082,6 +2094,7 @@ def _format_purge(summary: PurgeSummary, tr, include_details: bool = True) -> st
 
 
 def main() -> int:
+    _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     _apply_application_style(app)
     icon = QIcon(str(_resource_path(APP_ICON_PATH)))
