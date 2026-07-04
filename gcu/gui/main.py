@@ -1554,7 +1554,7 @@ class MainWindow(QMainWindow):
             self._append_status_log(payload)
 
     def _on_purge_done(self, summary: PurgeSummary) -> None:
-        self._append_status_log(_format_purge(summary, self.tr))
+        self._append_status_log(_format_purge(summary, self.tr, include_details=False))
 
     def _render_tracks(self, tracks: list[LocalTrack]) -> None:
         self.files = [track.track_file.source_path for track in tracks]

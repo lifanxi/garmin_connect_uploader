@@ -248,6 +248,32 @@ class CoreCliTests(unittest.TestCase):
         self.assertNotIn("would-delete activity=123", preview)
         self.assertIn("would-delete activity=123", detail)
 
+    def test_gui_purge_deleted_log_can_omit_details(self):
+        tr = lambda key, **kwargs: TRANSLATIONS["en"][key].format(**kwargs) if kwargs else TRANSLATIONS["en"][key]
+        summary = PurgeSummary(
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 31),
+            scanned_count=2,
+            matched_count=1,
+            deleted_count=1,
+            skipped_unsigned_count=1,
+            dry_run=False,
+            decisions=(
+                PurgeDecision(
+                    activity_id=123,
+                    activity_name="Hangzhou Track Me",
+                    status="deleted",
+                    manufacturer="HOLUX",
+                    device_id=0x12345678,
+                ),
+            ),
+        )
+
+        deleted = _format_purge(summary, tr, include_details=False)
+
+        self.assertIn("deleted: 1", deleted)
+        self.assertNotIn("deleted activity=123", deleted)
+
     def test_gui_uses_current_table_order_for_check_and_run(self):
         harness = FakeMainWindowHarness()
         harness.files_table = FakeTable(
