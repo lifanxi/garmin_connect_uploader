@@ -2,17 +2,23 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 
 block_cipher = None
 project_root = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 
 datas = []
+binaries = []
 hiddenimports = collect_submodules("gcu")
 hiddenimports += collect_submodules("fit_tool.profile")
 
-for package in ("timezonefinder", "geonamescache", "tzdata", "certifi"):
+for package in ("timezonefinder", "geonamescache", "tzdata"):
+    hiddenimports += collect_submodules(package)
+    datas += collect_data_files(package)
+    binaries += collect_dynamic_libs(package)
+
+for package in ("certifi",):
     datas += collect_data_files(package)
 
 for package in ("garth", "pydantic", "pydantic_core", "annotated_types"):
@@ -23,7 +29,7 @@ def app_analysis(script_name):
     return Analysis(
         [os.path.join(project_root, script_name)],
         pathex=[project_root],
-        binaries=[],
+        binaries=binaries,
         datas=datas,
         hiddenimports=hiddenimports,
         hookspath=[],
