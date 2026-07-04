@@ -1019,7 +1019,7 @@ class MainWindow(QMainWindow):
         start_date: date,
         end_date: date,
     ) -> None:
-        self._append_status_log(_format_purge(summary, self.tr))
+        self._append_status_log(_format_purge(summary, self.tr, include_details=False))
         if not summary.decisions:
             QMessageBox.information(self, self.tr("confirm_purge"), self.tr("no_purge_matches"))
             return
@@ -2060,7 +2060,7 @@ def _format_precheck(report: PrecheckReport, tr) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _format_purge(summary: PurgeSummary, tr) -> str:
+def _format_purge(summary: PurgeSummary, tr, include_details: bool = True) -> str:
     action = tr("would_delete") if summary.dry_run else tr("deleted")
     lines = [
         f"{tr('date_range')}: {summary.start_date.isoformat()} to {summary.end_date.isoformat()}",
@@ -2068,8 +2068,10 @@ def _format_purge(summary: PurgeSummary, tr) -> str:
         f"{tr('matched')}: {summary.matched_count}",
         f"{tr('skipped_unsigned')}: {summary.skipped_unsigned_count}",
         f"{action}: {len(summary.decisions)}",
-        "",
     ]
+    if not include_details:
+        return "\n".join(lines).rstrip()
+    lines.append("")
     for decision in summary.decisions:
         lines.append(
             f"{decision.status} activity={decision.activity_id} "

@@ -11,7 +11,7 @@ from requests import Response
 from requests import Session
 from requests import Request
 
-from gcu.app.models import FileCheckError, RemoteActivity, SyncDecision, UploadResult
+from gcu.app.models import FileCheckError, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision, UploadResult
 from gcu.app.models import TrackPoint
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
@@ -42,6 +42,7 @@ from gcu.gui.main import (
     TRANSLATIONS,
     _decision_display_name,
     _format_decision_summary,
+    _format_purge,
     _friendly_error_message,
     _localized_decision_message,
     _localized_plan_status,
@@ -191,6 +192,34 @@ class CoreCliTests(unittest.TestCase):
             _localized_decision_message("ValueError: bad data", tr),
             "ValueError: bad data",
         )
+
+    def test_gui_purge_preview_log_can_omit_details(self):
+        tr = lambda key, **kwargs: TRANSLATIONS["en"][key].format(**kwargs) if kwargs else TRANSLATIONS["en"][key]
+        summary = PurgeSummary(
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 31),
+            scanned_count=2,
+            matched_count=1,
+            deleted_count=0,
+            skipped_unsigned_count=1,
+            dry_run=True,
+            decisions=(
+                PurgeDecision(
+                    activity_id=123,
+                    activity_name="Hangzhou Track Me",
+                    status="would-delete",
+                    manufacturer="HOLUX",
+                    device_id=0x12345678,
+                ),
+            ),
+        )
+
+        preview = _format_purge(summary, tr, include_details=False)
+        detail = _format_purge(summary, tr)
+
+        self.assertIn("would delete: 1", preview)
+        self.assertNotIn("would-delete activity=123", preview)
+        self.assertIn("would-delete activity=123", detail)
 
     def test_gui_uses_current_table_order_for_check_and_run(self):
         harness = FakeMainWindowHarness()
