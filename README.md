@@ -12,7 +12,7 @@ stable tokens to avoid duplicate uploads.
 
 - Desktop GUI built with PySide6.
 - CLI for scripting, batch sync, conversion, purge, and diagnostics.
-- Columbus CSV, GPX, and NMEA RMC input support.
+- Columbus CSV, GPX, FIT, and NMEA RMC input support.
 - FIT activity generation with a stable tool device signature.
 - Duplicate detection by stable `[gcu:v1:...]` activity-name tokens.
 - Legacy duplicate matching by time, duration, and coordinates.
@@ -49,6 +49,12 @@ Standard GPX track files (`.gpx`, `.GPX`) with `trk/trkseg/trkpt` points are
 supported. Track point `lat`, `lon`, `ele`, and `time` fields are parsed. GPX
 timestamps are interpreted as UTC when they use `Z` or an explicit timezone
 offset.
+
+### FIT
+
+Existing FIT activity files (`.fit`, `.FIT`) can be used as input. Record
+timestamps, coordinates, altitude, speed, and heading are parsed and then flow
+through the same duplicate-detection and upload pipeline as the text formats.
 
 ## Duplicate And Safety Rules
 

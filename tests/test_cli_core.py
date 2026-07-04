@@ -12,6 +12,8 @@ from requests import Session
 from requests import Request
 
 from gcu.app.models import FileCheckError, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision, UploadResult
+from gcu.app.models import Track
+from gcu.app.models import TrackMetadata
 from gcu.app.models import TrackPoint
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
@@ -22,9 +24,11 @@ from gcu.duplicate.remote_index import RemoteActivityIndex
 from gcu.formats.base import FormatOptions
 from gcu.formats.city_resolver import resolve_display_city
 from gcu.formats.columbus_csv import ColumbusCsvReader
+from gcu.formats.fit import FitReader
 from gcu.formats.gpx import GpxReader
 from gcu.formats.nmea_rmc import NmeaRmcReader
 from gcu.formats.timezone_resolver import resolve_display_timezone
+from gcu.export.fit_writer import write_fit
 from gcu.garmin.client import ACCOUNT_HINT_FILE
 from gcu.garmin.client import _classify_upload_error
 from gcu.garmin.client import _extract_email
@@ -571,6 +575,117 @@ class CoreCliTests(unittest.TestCase):
         )[0]
 
         self.assertEqual(local_track.track_file.source_format, "gpx")
+
+    def test_fit_reader_parses_written_fit(self):
+        csv_path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect(
+            [csv_path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+        fit_path = csv_path.with_suffix(".fit")
+        write_fit(local_track.track_file.track, fit_path, local_track.planned_name)
+
+        reader = FitReader()
+        self.assertTrue(reader.can_read(fit_path))
+        track_file = reader.read(fit_path, FormatOptions(display_city_name="Hangzhou"))
+        points = track_file.track.points
+
+        self.assertEqual(track_file.source_format, "fit")
+        self.assertIn("manufacturer=", track_file.track.metadata.source_device or "")
+        self.assertEqual(track_file.track.metadata.point_count, 2)
+        self.assertEqual(points[0].timestamp_utc, datetime(2025, 12, 1, 0, 0, 1, tzinfo=timezone.utc))
+        self.assertAlmostEqual(points[0].latitude, 30.000001, places=5)
+        self.assertAlmostEqual(points[0].longitude, 120.000001, places=5)
+        self.assertEqual(points[0].altitude_m, 1)
+        self.assertEqual(points[0].speed_mps, 1)
+        self.assertEqual(track_file.track.metadata.display_name, "Hangzhou Track Me")
+
+    def test_fit_reader_uses_activity_start_metadata_when_records_start_later(self):
+        csv_path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect(
+            [csv_path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+        original_track = local_track.track_file.track
+        activity_start = datetime(2025, 11, 30, 22, 38, 39, tzinfo=timezone.utc)
+        track = Track(
+            points=original_track.points,
+            metadata=TrackMetadata(
+                start_time_utc=activity_start,
+                end_time_utc=original_track.metadata.end_time_utc,
+                duration_s=(original_track.metadata.end_time_utc - activity_start).total_seconds(),
+                point_count=original_track.metadata.point_count,
+                start_latitude=original_track.metadata.start_latitude,
+                start_longitude=original_track.metadata.start_longitude,
+                end_latitude=original_track.metadata.end_latitude,
+                end_longitude=original_track.metadata.end_longitude,
+                display_name=original_track.metadata.display_name,
+                source_device=original_track.metadata.source_device,
+                display_timezone=original_track.metadata.display_timezone,
+                display_city=original_track.metadata.display_city,
+            ),
+        )
+        fit_path = csv_path.with_suffix(".fit")
+        write_fit(track, fit_path, local_track.planned_name)
+
+        track_file = FitReader().read(fit_path, FormatOptions(display_city_name="Hangzhou"))
+
+        self.assertEqual(track_file.track.points[0].timestamp_utc, original_track.points[0].timestamp_utc)
+        self.assertEqual(track_file.track.metadata.start_time_utc, activity_start)
+        self.assertEqual(track_file.track.metadata.end_time_utc, original_track.metadata.end_time_utc)
+
+    def test_fit_reader_uses_fit_timer_duration_metadata(self):
+        csv_path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect(
+            [csv_path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+        original_track = local_track.track_file.track
+        timer_duration_s = 40202.09765625
+        track = Track(
+            points=original_track.points,
+            metadata=TrackMetadata(
+                start_time_utc=original_track.metadata.start_time_utc,
+                end_time_utc=original_track.metadata.end_time_utc,
+                duration_s=timer_duration_s,
+                point_count=original_track.metadata.point_count,
+                start_latitude=original_track.metadata.start_latitude,
+                start_longitude=original_track.metadata.start_longitude,
+                end_latitude=original_track.metadata.end_latitude,
+                end_longitude=original_track.metadata.end_longitude,
+                display_name=original_track.metadata.display_name,
+                source_device=original_track.metadata.source_device,
+                display_timezone=original_track.metadata.display_timezone,
+                display_city=original_track.metadata.display_city,
+            ),
+        )
+        fit_path = csv_path.with_suffix(".fit")
+        write_fit(track, fit_path, local_track.planned_name)
+
+        track_file = FitReader().read(fit_path, FormatOptions(display_city_name="Hangzhou"))
+
+        self.assertAlmostEqual(track_file.track.metadata.duration_s, timer_duration_s, places=3)
+        self.assertAlmostEqual(
+            track_file.track.metadata.end_time_utc.timestamp(),
+            (original_track.metadata.start_time_utc + timedelta(seconds=timer_duration_s)).timestamp(),
+            places=3,
+        )
+
+    def test_format_auto_detects_fit(self):
+        csv_path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect(
+            [csv_path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+        fit_path = csv_path.with_suffix(".FIT")
+        write_fit(local_track.track_file.track, fit_path, local_track.planned_name)
+
+        inspected = SyncService().inspect(
+            [fit_path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+
+        self.assertEqual(inspected.track_file.source_format, "fit")
 
     def test_precheck_reports_duplicate_overlap_and_conflict(self):
         duplicate_a = self._write_csv(CSV_TEXT, name="duplicate-a.CSV")
