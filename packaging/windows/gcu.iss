@@ -29,7 +29,7 @@ WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=lowest
-UninstallDisplayIcon={app}\GarminConnectUploader.exe
+UninstallDisplayIcon={app}\assets\icons\gcu-icon.ico
 SetupIconFile={#IconFile}
 
 [Languages]
@@ -42,9 +42,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Garmin Connect Uploader"; Filename: "{app}\GarminConnectUploader.exe"; WorkingDir: "{app}"; IconFilename: "{app}\GarminConnectUploader.exe"; IconIndex: 0; AppUserModelID: "{#AppUserModelID}"
+Name: "{group}\Garmin Connect Uploader"; Filename: "{app}\GarminConnectUploader.exe"; WorkingDir: "{app}"; IconFilename: "{app}\assets\icons\gcu-icon.ico"; AppUserModelID: "{#AppUserModelID}"
 Name: "{group}\GCU Command Prompt"; Filename: "{cmd}"; Parameters: "/K ""cd /d {app} && echo gcu.exe is available in this directory"""; WorkingDir: "{app}"
-Name: "{autodesktop}\Garmin Connect Uploader"; Filename: "{app}\GarminConnectUploader.exe"; WorkingDir: "{app}"; IconFilename: "{app}\GarminConnectUploader.exe"; IconIndex: 0; Tasks: desktopicon; AppUserModelID: "{#AppUserModelID}"
+Name: "{autodesktop}\Garmin Connect Uploader"; Filename: "{app}\GarminConnectUploader.exe"; WorkingDir: "{app}"; IconFilename: "{app}\assets\icons\gcu-icon.ico"; Tasks: desktopicon; AppUserModelID: "{#AppUserModelID}"
 
 [Run]
 Filename: "{app}\GarminConnectUploader.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

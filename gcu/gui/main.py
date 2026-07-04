@@ -137,8 +137,10 @@ RUNNABLE_PLAN_STATUSES = {"upload", "skip-legacy-match", "backfilled-token"}
 SUCCESSFUL_TASK_STATUSES = {"upload", "skip-token", "backfilled-token", "upload-conflict"}
 COMPLETED_PLAN_STATUSES = {"skip-token", "backfilled-token", "upload-conflict", "completed"}
 SUPPORTED_DOMAINS = {"garmin.com", "garmin.cn"}
-APP_ICON_PATH = Path("assets/icons/gcu-icon.png")
+APP_ICON_PATH = Path("assets/icons/gcu-icon.ico")
+APP_ICON_FALLBACK_PATH = Path("assets/icons/gcu-icon.png")
 APP_USER_MODEL_ID = "LiFanxi.GarminConnectUploader"
+_WINDOW_ICON_HANDLES: list[int] = []
 
 
 TRANSLATIONS = {
@@ -490,6 +492,62 @@ def _set_windows_app_user_model_id() -> None:
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def _app_icon() -> QIcon:
+    icon_path = _resource_path(APP_ICON_PATH)
+    icon = QIcon(str(icon_path))
+    if icon.isNull():
+        icon = QIcon(str(_resource_path(APP_ICON_FALLBACK_PATH)))
+    return icon
+
+
+def _set_windows_window_icons(window: QMainWindow) -> None:
+    if sys.platform != "win32":
+        return
+    icon_path = _resource_path(APP_ICON_PATH)
+    if not icon_path.exists():
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = int(window.winId())
+        user32 = ctypes.windll.user32
+        image_icon = 1
+        lr_loadfromfile = 0x00000010
+        wm_seticon = 0x0080
+        icon_small = 0
+        icon_big = 1
+        icon_small2 = 2
+
+        small_size = user32.GetSystemMetrics(49) or user32.GetSystemMetrics(11) or 16
+        big_size = user32.GetSystemMetrics(11) or 32
+        load_image = user32.LoadImageW
+        load_image.argtypes = [
+            wintypes.HINSTANCE,
+            wintypes.LPCWSTR,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        load_image.restype = ctypes.c_void_p
+        send_message = user32.SendMessageW
+        send_message.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        send_message.restype = wintypes.LPARAM
+
+        small_icon = load_image(None, str(icon_path), image_icon, small_size, small_size, lr_loadfromfile)
+        big_icon = load_image(None, str(icon_path), image_icon, big_size, big_size, lr_loadfromfile)
+        if small_icon:
+            send_message(hwnd, wm_seticon, icon_small, small_icon)
+            send_message(hwnd, wm_seticon, icon_small2, small_icon)
+            _WINDOW_ICON_HANDLES.append(int(small_icon))
+        if big_icon:
+            send_message(hwnd, wm_seticon, icon_big, big_icon)
+            _WINDOW_ICON_HANDLES.append(int(big_icon))
     except Exception:
         pass
 
@@ -2097,10 +2155,11 @@ def main() -> int:
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     _apply_application_style(app)
-    icon = QIcon(str(_resource_path(APP_ICON_PATH)))
+    icon = _app_icon()
     app.setWindowIcon(icon)
     window = MainWindow()
     window.setWindowIcon(icon)
+    _set_windows_window_icons(window)
     window.show()
     return app.exec()
 
