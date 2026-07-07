@@ -17,6 +17,7 @@ from gcu.app.models import BackupDecision, BackupSummary, FileCheckError, PurgeD
 from gcu.app.models import Track
 from gcu.app.models import TrackMetadata
 from gcu.app.models import TrackPoint
+from gcu.app.naming import planned_activity_name
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService, _backup_activity_filename
 from gcu.cli.main import _existing_files
@@ -24,7 +25,7 @@ from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
 from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
 from gcu.duplicate.remote_index import RemoteActivityIndex
 from gcu.formats.base import FormatOptions
-from gcu.formats.city_resolver import resolve_display_city
+from gcu.formats.city_resolver import resolve_display_city, resolve_display_place
 from gcu.formats.columbus_csv import ColumbusCsvReader
 from gcu.formats.fit import FitReader
 from gcu.formats.gpx import GpxReader
@@ -43,9 +44,11 @@ import gcu.gui.main as gui_main
 from gcu.gui.main import MainWindow
 from gcu.gui.main import (
     FILE_COLUMN,
+    NAME_COLUMN,
     PLAN_COLUMN,
     PLAN_STATUS_ROLE,
     POINTS_COLUMN,
+    START_UTC_COLUMN,
     SortableTableItem,
     TRANSLATIONS,
     _decision_display_name,
@@ -335,6 +338,52 @@ class CoreCliTests(unittest.TestCase):
             [Path("/tmp/third.CSV"), Path("/tmp/first.CSV")],
         )
 
+    def test_gui_sync_options_include_name_settings_when_non_empty(self):
+        harness = FakeMainWindowHarness()
+        harness._name_settings = gui_main.GuiNameSettings()
+
+        default_options = MainWindow._sync_options(harness, dry_run=True)
+        self.assertIsNone(default_options.home_city)
+        self.assertIsNone(default_options.name_template)
+
+        harness._name_settings = gui_main.GuiNameSettings(
+            home_city="Hangzhou",
+            name_template="[{country} ][{state} ]{city} Track Me",
+        )
+        configured_options = MainWindow._sync_options(harness, dry_run=False)
+
+        self.assertEqual(configured_options.home_city, "Hangzhou")
+        self.assertEqual(configured_options.name_template, "[{country} ][{state} ]{city} Track Me")
+
+    def test_gui_clear_inspect_results_keeps_files_and_clears_cached_plans(self):
+        harness = FakeMainWindowHarness()
+        path = Path("/tmp/track.CSV")
+        harness.files = [path]
+        harness.local_tracks = [object()]
+        harness._local_track_cache = {path: object()}
+        harness._queued_plan_snapshot = {path: ("upload", "Queued")}
+        harness.files_table = FakeTable(
+            [
+                {
+                    FILE_COLUMN: FakeItem(str(path)),
+                    START_UTC_COLUMN: FakeItem("2026-01-01T00:00:00Z"),
+                    PLAN_COLUMN: FakeItem(status="upload"),
+                    NAME_COLUMN: FakeItem("Old name"),
+                }
+            ]
+        )
+
+        MainWindow._clear_inspect_results(harness)
+
+        self.assertEqual(harness.files, [path])
+        self.assertEqual(harness.local_tracks, [])
+        self.assertEqual(harness._local_track_cache, {})
+        self.assertEqual(harness._queued_plan_snapshot, {})
+        self.assertEqual(harness.files_table.item(0, FILE_COLUMN).data(gui_main.Qt.UserRole), str(path))
+        self.assertEqual(harness.files_table.item(0, START_UTC_COLUMN).text(), "")
+        self.assertEqual(harness.files_table.item(0, PLAN_COLUMN).text(), "")
+        self.assertEqual(harness.files_table.item(0, NAME_COLUMN).text(), "")
+
     def test_gui_points_column_sorts_as_number(self):
         small = SortableTableItem("20")
         large = SortableTableItem("100")
@@ -513,6 +562,115 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(local_track.track_file.source_format, "columbus-csv")
         self.assertEqual(local_track.track_file.track.metadata.point_count, 2)
 
+    def test_name_template_can_use_country_and_state(self):
+        path = self._write_csv(CSV_TEXT)
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(
+                format_options=FormatOptions(),
+                name_template="{country} {state} {city} Track Me",
+            ),
+        )[0]
+
+        self.assertEqual(local_track.track_file.track.metadata.display_country, "China")
+        self.assertEqual(local_track.track_file.track.metadata.display_state, "Zhejiang")
+        self.assertEqual(
+            local_track.planned_name,
+            f"China Zhejiang Hangzhou Track Me {local_track.token}",
+        )
+
+    def test_optional_name_template_omits_home_state_and_country(self):
+        path = self._write_csv(CSV_TEXT)
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(
+                format_options=FormatOptions(),
+                name_template="[{country} ][{state} ]{city} Track Me",
+                home_city="Hangzhou",
+            ),
+        )[0]
+
+        self.assertEqual(local_track.planned_name, f"Hangzhou Track Me {local_track.token}")
+
+    def test_optional_name_template_omits_home_country_only(self):
+        path = self._write_file(NMEA_TEXT, "track.txt")
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(
+                format_options=FormatOptions(),
+                name_template="[{country} ][{state} ]{city} Track Me",
+                home_city="Hangzhou",
+            ),
+        )[0]
+
+        self.assertEqual(local_track.planned_name, f"Jiangsu Nanjing Track Me {local_track.token}")
+
+    def test_optional_name_template_keeps_country_for_foreign_activity(self):
+        path = self._write_file(NMEA_US_TEXT, "track.txt")
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(
+                format_options=FormatOptions(),
+                name_template="[{country} ][{state} ]{city} Track Me",
+                home_city="Hangzhou",
+            ),
+        )[0]
+
+        self.assertEqual(local_track.planned_name, f"United States California San Jose Track Me {local_track.token}")
+
+    def test_plain_name_template_does_not_omit_home_location(self):
+        path = self._write_csv(CSV_TEXT)
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(
+                format_options=FormatOptions(),
+                name_template="{country} {state} {city} Track Me",
+                home_city="Hangzhou",
+            ),
+        )[0]
+
+        self.assertEqual(local_track.planned_name, f"China Zhejiang Hangzhou Track Me {local_track.token}")
+
+    def test_name_template_omits_optional_state_when_state_equals_city(self):
+        track = self._track_with_place(city="Beijing", country="China", state="Beijing")
+
+        name = planned_activity_name(track, "[gcu:v1:aaaaaaaaaaaaaaaa]", "[{state} ]{city} Track Me")
+
+        self.assertEqual(name, "Beijing Track Me [gcu:v1:aaaaaaaaaaaaaaaa]")
+
+    def test_name_template_omits_optional_city_when_state_equals_city(self):
+        track = self._track_with_place(city="Beijing", country="China", state="Beijing")
+
+        name = planned_activity_name(track, "[gcu:v1:aaaaaaaaaaaaaaaa]", "{state}[ {city}] Track Me")
+
+        self.assertEqual(name, "Beijing Track Me [gcu:v1:aaaaaaaaaaaaaaaa]")
+
+    def test_name_template_keeps_city_when_state_and_city_are_optional(self):
+        track = self._track_with_place(city="Beijing", country="China", state="Beijing")
+
+        name = planned_activity_name(track, "[gcu:v1:aaaaaaaaaaaaaaaa]", "[{state} ][{city} ]Track Me")
+
+        self.assertEqual(name, "Beijing Track Me [gcu:v1:aaaaaaaaaaaaaaaa]")
+
+    def test_name_template_keeps_city_when_state_and_city_are_in_same_optional_block(self):
+        track = self._track_with_place(city="Beijing", country="China", state="Beijing")
+
+        name = planned_activity_name(track, "[gcu:v1:aaaaaaaaaaaaaaaa]", "[{state} {city} ]Track Me")
+
+        self.assertEqual(name, "Beijing Track Me [gcu:v1:aaaaaaaaaaaaaaaa]")
+
+    def test_name_template_keeps_city_when_state_and_city_are_required(self):
+        track = self._track_with_place(city="Beijing", country="China", state="Beijing")
+
+        name = planned_activity_name(track, "[gcu:v1:aaaaaaaaaaaaaaaa]", "{country} {state} {city} Track Me")
+
+        self.assertEqual(name, "China Beijing Track Me [gcu:v1:aaaaaaaaaaaaaaaa]")
+
     def test_columbus_reader_can_override_source_timezone(self):
         path = self._write_csv(CSV_TEXT)
         track_file = ColumbusCsvReader().read(path, FormatOptions(timezone_name="Asia/Shanghai"))
@@ -558,6 +716,22 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertEqual(resolve_display_city(points, "auto"), "Nanjing")
 
+    def test_auto_display_place_includes_country_and_state(self):
+        start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
+        hangzhou = resolve_display_place((TrackPoint(start, 30.2741, 120.1551),), "auto")
+        san_jose = resolve_display_place((TrackPoint(start, 37.28, -121.86),), "auto")
+        tokyo = resolve_display_place((TrackPoint(start, 35.6895, 139.6917),), "auto")
+
+        self.assertEqual(hangzhou.city, "Hangzhou")
+        self.assertEqual(hangzhou.country, "China")
+        self.assertEqual(hangzhou.state, "Zhejiang")
+        self.assertEqual(san_jose.city, "San Jose")
+        self.assertEqual(san_jose.country, "United States")
+        self.assertEqual(san_jose.state, "California")
+        self.assertEqual(tokyo.city, "Tokyo")
+        self.assertEqual(tokyo.country, "Japan")
+        self.assertEqual(tokyo.state, "Tokyo")
+
     def test_auto_display_city_uses_start_city_when_end_matches_start(self):
         start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
         points = (
@@ -590,6 +764,8 @@ class CoreCliTests(unittest.TestCase):
         self.assertAlmostEqual(first.speed_mps, 2.25 * 0.514444)
         self.assertEqual(track_file.track.metadata.display_timezone, "Asia/Shanghai")
         self.assertEqual(track_file.track.metadata.display_city, "Nanjing")
+        self.assertEqual(track_file.track.metadata.display_country, "China")
+        self.assertEqual(track_file.track.metadata.display_state, "Jiangsu")
         self.assertEqual(track_file.track.metadata.display_name, "Nanjing Track Me")
 
     def test_nmea_rmc_reader_detects_us_display_timezone(self):
@@ -601,6 +777,8 @@ class CoreCliTests(unittest.TestCase):
         self.assertAlmostEqual(first.longitude, -121.8658466667)
         self.assertEqual(track_file.track.metadata.display_timezone, "America/Los_Angeles")
         self.assertEqual(track_file.track.metadata.display_city, "San Jose")
+        self.assertEqual(track_file.track.metadata.display_country, "United States")
+        self.assertEqual(track_file.track.metadata.display_state, "California")
         self.assertEqual(track_file.track.metadata.display_name, "San Jose Track Me")
 
     def test_nmea_rmc_reader_rejects_bad_checksum(self):
@@ -1614,6 +1792,28 @@ class CoreCliTests(unittest.TestCase):
     def _write_csv(self, text: str, name: str = "track.CSV") -> Path:
         return self._write_file(text, name)
 
+    def _track_with_place(self, city: str, country: str, state: str) -> Track:
+        start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
+        point = TrackPoint(start, 39.9042, 116.4074)
+        return Track(
+            points=(point,),
+            metadata=TrackMetadata(
+                start_time_utc=start,
+                end_time_utc=start,
+                duration_s=0,
+                point_count=1,
+                start_latitude=point.latitude,
+                start_longitude=point.longitude,
+                end_latitude=point.latitude,
+                end_longitude=point.longitude,
+                display_name=f"{city} Track Me",
+                display_timezone="Asia/Shanghai",
+                display_city=city,
+                display_country=country,
+                display_state=state,
+            ),
+        )
+
     def _write_file(self, text: str, name: str) -> Path:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -1626,31 +1826,64 @@ class FakeMainWindowHarness:
     _table_rows_in_view_order = MainWindow._table_rows_in_view_order
     _table_files = MainWindow._table_files
     _runnable_plan_files = MainWindow._runnable_plan_files
+    _sync_options = MainWindow._sync_options
+    _clear_inspect_results = MainWindow._clear_inspect_results
+    _set_table_values = MainWindow._set_table_values
 
 
 class FakeItem:
-    def __init__(self, file_path: str | None = None, status: str | None = None):
+    def __init__(self, file_path: str | None = None, status: str | None = None, text: str | None = None):
+        self._text = text if text is not None else (file_path or "")
         self.file_path = file_path
         self.status = status
+        self.values = {}
+        self._flags = gui_main.Qt.ItemIsSelectable | gui_main.Qt.ItemIsEnabled | gui_main.Qt.ItemIsEditable
+
+    def text(self):
+        return self._text
+
+    def flags(self):
+        return self._flags
+
+    def setFlags(self, flags):
+        self._flags = flags
+
+    def setData(self, role, value):
+        self.values[role] = value
+        if role == gui_main.Qt.UserRole:
+            self.file_path = value
+
+    def setToolTip(self, value):
+        self.tooltip = value
 
     def data(self, role):
         if role == gui_main.Qt.UserRole:
             return self.file_path
         if role == PLAN_STATUS_ROLE:
             return self.status
-        return None
+        return self.values.get(role)
 
 
 class FakeTable:
     def __init__(self, rows, visual_order: list[int] | None = None):
         self.rows = rows
         self.visual_order = visual_order
+        self.sorting_enabled = False
 
     def rowCount(self):
         return len(self.rows)
 
     def item(self, row, column):
         return self.rows[row].get(column)
+
+    def setItem(self, row, column, item):
+        self.rows[row][column] = item
+
+    def isSortingEnabled(self):
+        return self.sorting_enabled
+
+    def setSortingEnabled(self, enabled):
+        self.sorting_enabled = enabled
 
     def verticalHeader(self):
         if self.visual_order is None:

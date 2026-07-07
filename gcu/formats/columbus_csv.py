@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from gcu.app.models import Track, TrackFile, TrackMetadata, TrackPoint
 from gcu.formats.base import FormatOptions
-from gcu.formats.city_resolver import resolve_display_city
+from gcu.formats.city_resolver import resolve_display_place
 from gcu.formats.timezone_resolver import resolve_display_timezone
 
 
@@ -71,7 +71,7 @@ class ColumbusCsvReader:
             options.display_timezone_name,
             fallback_timezone=options.display_timezone_fallback,
         )
-        display_city = resolve_display_city(
+        display_place = resolve_display_place(
             tuple(points),
             options.display_city_name,
             min_population=options.display_city_min_population,
@@ -86,10 +86,12 @@ class ColumbusCsvReader:
             start_longitude=first.longitude,
             end_latitude=last.latitude,
             end_longitude=last.longitude,
-            display_name=self._default_display_name(first.timestamp_utc, duration_s, display_tz, display_city),
+            display_name=self._default_display_name(first.timestamp_utc, duration_s, display_tz, display_place.city),
             source_device="Columbus",
             display_timezone=display_timezone_name,
-            display_city=display_city,
+            display_city=display_place.city,
+            display_country=display_place.country,
+            display_state=display_place.state,
         )
         return TrackFile(
             source_path=path,

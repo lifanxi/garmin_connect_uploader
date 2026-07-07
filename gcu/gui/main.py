@@ -70,6 +70,12 @@ class BackupSettings:
 
 
 @dataclass(frozen=True)
+class GuiNameSettings:
+    home_city: str = ""
+    name_template: str = ""
+
+
+@dataclass(frozen=True)
 class InspectBundle:
     report: PrecheckReport
     tracks: list[LocalTrack]
@@ -199,6 +205,10 @@ TRANSLATIONS = {
         "duration": "Duration",
         "delete_matched": "Clean Uploaded Tracks",
         "backup": "Backup",
+        "settings": "Settings",
+        "settings_title": "Settings",
+        "settings_home_city": "City",
+        "settings_name_template": "Activity name template",
         "backup_title": "Backup Activities",
         "backup_text": "Download Garmin Connect activities in the selected date range as original track files.",
         "backup_type": "Type",
@@ -388,11 +398,15 @@ TRANSLATIONS = {
         "duration": "时长",
         "delete_matched": "清理已上传轨迹",
         "backup": "备份",
+        "settings": "配置",
+        "settings_title": "配置",
+        "settings_home_city": "城市",
+        "settings_name_template": "活动名称模板",
         "backup_title": "备份活动",
         "backup_text": "将所选日期范围内的 Garmin Connect 活动下载为原始轨迹文件。",
         "backup_type": "类型",
         "backup_gcu": "本工具上传",
-        "backup_non_gcu": "非工具上传",
+        "backup_non_gcu": "非本工具上传",
         "backup_target": "备份目标",
         "browse": "浏览",
         "backup_target_title": "选择备份目标",
@@ -747,6 +761,7 @@ class MainWindow(QMainWindow):
         self._sync_task_running = False
         self._sync_cancel_requested = False
         self._queued_plan_snapshot: dict[Path, tuple[str, str | None]] = {}
+        self._name_settings = GuiNameSettings()
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -896,10 +911,13 @@ class MainWindow(QMainWindow):
 
         self.purge_button = QPushButton(self.tr("delete_matched"))
         self.backup_button = QPushButton(self.tr("backup"))
+        self.settings_button = QPushButton(self.tr("settings"))
+        layout.addWidget(self.settings_button)
         layout.addWidget(self.backup_button)
         layout.addWidget(self.purge_button)
         layout.addStretch(1)
 
+        self.settings_button.clicked.connect(self._show_settings_dialog)
         self.backup_button.clicked.connect(self._show_backup_dialog)
         self.purge_button.clicked.connect(self._preview_then_purge)
         return page
@@ -1021,6 +1039,18 @@ class MainWindow(QMainWindow):
         self._local_track_cache = {}
         self._render_file_paths()
 
+    def _clear_inspect_results(self) -> None:
+        self.local_tracks = []
+        self._local_track_cache = {}
+        self._queued_plan_snapshot = {}
+        for row in range(self.files_table.rowCount()):
+            self._set_table_values(
+                self.files_table,
+                row,
+                START_UTC_COLUMN,
+                ["", "", "", "", "", "", "", "", "", ""],
+            )
+
     def _render_file_paths(self) -> None:
         sorting_enabled = self.files_table.isSortingEnabled()
         self.files_table.setSortingEnabled(False)
@@ -1140,6 +1170,40 @@ class MainWindow(QMainWindow):
         self._authenticated = False
         self._refresh_action_state()
         self._append_login_log(self.tr("logout_complete"))
+
+    def _show_settings_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.tr("settings_title"))
+        layout = QVBoxLayout(dialog)
+
+        city_row = QHBoxLayout()
+        city_input = QLineEdit()
+        city_input.setText(self._name_settings.home_city)
+        city_row.addWidget(QLabel(self.tr("settings_home_city")))
+        city_row.addWidget(city_input, 1)
+        layout.addLayout(city_row)
+
+        template_row = QHBoxLayout()
+        template_input = QLineEdit()
+        template_input.setText(self._name_settings.name_template)
+        template_input.setMinimumWidth(360)
+        template_row.addWidget(QLabel(self.tr("settings_name_template")))
+        template_row.addWidget(template_input, 1)
+        layout.addLayout(template_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            next_settings = GuiNameSettings(
+                home_city=city_input.text().strip(),
+                name_template=template_input.text().strip(),
+            )
+            if next_settings != self._name_settings:
+                self._name_settings = next_settings
+                self._clear_inspect_results()
 
     def _show_backup_dialog(self) -> None:
         settings = self._backup_dialog_settings()
@@ -2059,6 +2123,7 @@ class MainWindow(QMainWindow):
         authenticated_idle = self._authenticated and not task_running
         self.purge_button.setEnabled(authenticated_idle)
         self.backup_button.setEnabled(authenticated_idle)
+        self.settings_button.setEnabled(not task_running)
 
         self.files_table.setEnabled(self._authenticated)
         file_controls_enabled = authenticated_idle
@@ -2091,9 +2156,13 @@ class MainWindow(QMainWindow):
         return False
 
     def _sync_options(self, dry_run: bool) -> SyncOptions:
+        home_city = self._name_settings.home_city or None
+        name_template = self._name_settings.name_template or None
         return SyncOptions(
             format_options=FormatOptions(),
             dry_run=dry_run,
+            name_template=name_template,
+            home_city=home_city,
             sort_for_upload=False,
         )
 

@@ -25,6 +25,7 @@ from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
 from gcu.duplicate.remote_index import RemoteActivityIndex
 from gcu.export.fit_writer import write_fit
 from gcu.formats.base import FormatOptions, get_reader
+from gcu.formats.city_resolver import resolve_city_place
 from gcu.garmin.errors import DuplicateUploadError
 from gcu.garmin.signature import is_gcu_activity
 
@@ -57,6 +58,7 @@ class SyncOptions:
     match_options: MatchOptions = MatchOptions()
     dry_run: bool = False
     name_template: str | None = None
+    home_city: str | None = None
     keep_fit: bool = False
     output_dir: Path | None = None
     post_upload_wait_base_s: int = 30
@@ -497,7 +499,18 @@ class SyncService:
         reader = get_reader(path, options.format_options)
         track_file = reader.read(path, options.format_options)
         digest, token = fingerprint_track(track_file.track)
-        name = planned_activity_name(track_file.track, token, options.name_template)
+        home_place = (
+            resolve_city_place(options.home_city, options.format_options.display_city_min_population)
+            if options.home_city
+            else None
+        )
+        name = planned_activity_name(
+            track_file.track,
+            token,
+            options.name_template,
+            home_country=home_place.country if home_place else None,
+            home_state=home_place.state if home_place else None,
+        )
         return LocalTrack(track_file=track_file, token=token, digest=digest, planned_name=name)
 
     def _decide(

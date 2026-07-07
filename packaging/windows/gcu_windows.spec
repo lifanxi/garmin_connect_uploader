@@ -29,6 +29,10 @@ for package in ("garth", "pydantic", "pydantic_core", "annotated_types"):
 datas += [
     (os.path.join(project_root, "assets", "icons", "gcu-icon.png"), os.path.join("assets", "icons")),
     (icon_file, os.path.join("assets", "icons")),
+    (
+        os.path.join(project_root, "gcu", "formats", "data", "admin1CodesASCII.txt"),
+        os.path.join("gcu", "formats", "data"),
+    ),
 ]
 
 

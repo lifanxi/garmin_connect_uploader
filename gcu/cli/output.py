@@ -22,6 +22,8 @@ def print_local_tracks(items: list[LocalTrack], as_json: bool = False) -> None:
         print(f"  end:    {metadata.end_time_utc.isoformat()}")
         print(f"  display timezone: {metadata.display_timezone}")
         print(f"  display city: {metadata.display_city or '-'}")
+        print(f"  display country: {metadata.display_country or '-'}")
+        print(f"  display state: {metadata.display_state or '-'}")
         print(f"  token:  {item.token}")
         print(f"  name:   {item.planned_name}")
         for warning in item.track_file.warnings:
@@ -168,6 +170,8 @@ def _local_track_summary(item: LocalTrack) -> dict[str, Any]:
         "end_longitude": metadata.end_longitude,
         "display_timezone": metadata.display_timezone,
         "display_city": metadata.display_city,
+        "display_country": metadata.display_country,
+        "display_state": metadata.display_state,
         "token": item.token,
         "digest": item.digest,
         "planned_name": item.planned_name,

@@ -195,6 +195,7 @@ def add_common_file_args(parser: argparse.ArgumentParser) -> None:
         default=300_000,
         help="Minimum population for automatic display city lookup",
     )
+    parser.add_argument("--home-city", help="Home city used to simplify optional country/state name-template blocks")
     parser.add_argument("--name-template", help="Activity name template")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -347,6 +348,7 @@ def _sync_options(args, dry_run: bool) -> SyncOptions:
         ),
         dry_run=dry_run,
         name_template=args.name_template,
+        home_city=getattr(args, "home_city", None),
         keep_fit=getattr(args, "keep_fit", False),
         output_dir=getattr(args, "output_dir", None),
         post_upload_wait_base_s=getattr(args, "post_upload_wait_base_s", 30),

@@ -169,6 +169,9 @@ Use **Backup** to download Garmin Connect activities in a selected date range.
 The backup dialog can include activities uploaded by this tool, activities not
 uploaded by this tool, or both.
 
+Use **Settings** in the maintenance section to set a home city and activity name
+template for GUI inspect/run operations. Empty values keep the defaults.
+
 Use **Clean Uploaded Tracks** to delete remote activities uploaded by this tool.
 The GUI previews matching activities in a confirmation dialog, and deletion
 requires typing `DELETE`. The dialog also has an unchecked option to include
@@ -329,7 +332,17 @@ If the city cannot be resolved, the base name is:
 Track Me [gcu:v1:<token>]
 ```
 
-Use `--name-template` to override the base naming rule.
+Use `--name-template` to override the base naming rule. Supported placeholders
+are `{date}`, `{duration}`, `{start}`, `{end}`, `{points}`, `{city}`,
+`{country}`, and `{state}`.
+
+Use `--home-city` with optional template blocks to shorten local activity names.
+Square brackets mark optional blocks. When a track resolves to the same state as
+the home city, optional `{country}` and `{state}` blocks are omitted. When it is
+in a different state but the same country, optional `{country}` blocks are
+omitted. Plain placeholders outside square brackets are always rendered. When
+`{state}` and `{city}` resolve to the same value, optional occurrences are
+omitted first; if both are optional or both are required, only `{city}` is kept.
 
 Source timestamps are UTC by default. Human-readable display timezone is resolved
 from coordinates when `--display-timezone auto` is used. If automatic lookup
@@ -338,6 +351,11 @@ cannot decide, the fallback is `Asia/Shanghai` unless overridden.
 City resolution is offline. For a track, the resolver compares the start and end
 cities first. If they differ, it progressively samples midpoint segments until a
 city wins by majority. If all sampled points tie, the start city is used.
+Country is resolved from the same offline city record. State/province names are
+resolved from the bundled GeoNames `admin1CodesASCII.txt` data.
+
+The bundled administrative-region data is from GeoNames and is licensed under
+Creative Commons Attribution 4.0. See https://www.geonames.org/.
 
 Useful format options:
 
@@ -348,7 +366,9 @@ Useful format options:
 --display-timezone-fallback Asia/Shanghai
 --display-city auto
 --display-city-min-population 300000
---name-template "{city} Track Me"
+--home-city Hangzhou
+--name-template "{country} {state} {city} Track Me"
+--name-template "[{country} ][{state} ]{city} Track Me"
 ```
 
 ## Garmin HTTP Verbose Log

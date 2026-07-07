@@ -134,6 +134,8 @@ GUI 是一个单窗口流程：
 
 使用 **备份** 下载指定日期范围内的 Garmin Connect 活动。备份对话框可以选择本工具上传、非本工具上传或两者都包含。
 
+使用维护区域的 **配置** 可以为 GUI 的检查/运行操作设置 home city 和活动名称模板。留空时保持默认行为。
+
 使用 **清理已上传轨迹** 删除由本工具上传的远端活动。GUI 会先在确认对话框中预览匹配活动，删除前需要输入 `DELETE`。对话框中还有一个默认未勾选的选项，可以包含非本工具上传活动；启用该选项后，扫描前需要接受额外警告。
 
 ## CLI 用法
@@ -280,11 +282,17 @@ python gcu_cli.py backup --domain garmin.cn --include non-gcu --output-dir garmi
 Track Me [gcu:v1:<token>]
 ```
 
-使用 `--name-template` 可以覆盖基础命名规则。
+使用 `--name-template` 可以覆盖基础命名规则。支持的占位符包括 `{date}`、`{duration}`、`{start}`、`{end}`、`{points}`、`{city}`、`{country}` 和 `{state}`。
+
+配合 `--home-city` 可以用可选模板块缩短本地活动名称。方括号表示可选块。当轨迹解析出的省/州与 home city 相同时，可选的 `{country}` 和 `{state}` 块会被省略；当省/州不同但国家相同时，可选的 `{country}` 块会被省略。没有放进方括号的普通占位符始终会正常渲染。
+
+当 `{state}` 和 `{city}` 解析结果相同时，会优先省略可选的那一个；如果两者都可选或都必选，则只保留 `{city}`，省略 `{state}`。
 
 源文件时间戳默认按 UTC 解析。使用 `--display-timezone auto` 时，会根据坐标解析面向人类展示的时区。如果自动解析无法决定，默认回退到 `Asia/Shanghai`，除非显式覆盖。
 
-城市解析是离线完成的。对于一个轨迹，解析器会先比较起点和终点城市。如果两者不同，会逐步采样中点分段，直到某个城市获得多数。如果所有采样点都无法分出胜负，则使用起点城市。
+城市解析是离线完成的。对于一个轨迹，解析器会先比较起点和终点城市。如果两者不同，会逐步采样中点分段，直到某个城市获得多数。如果所有采样点都无法分出胜负，则使用起点城市。国家会从同一个离线城市记录中解析。省/州名称会从随包的 GeoNames `admin1CodesASCII.txt` 数据中解析。
+
+随包的行政区数据来自 GeoNames，使用 Creative Commons Attribution 4.0 许可。见 https://www.geonames.org/。
 
 常用格式选项：
 
@@ -295,7 +303,9 @@ Track Me [gcu:v1:<token>]
 --display-timezone-fallback Asia/Shanghai
 --display-city auto
 --display-city-min-population 300000
---name-template "{city} Track Me"
+--home-city Hangzhou
+--name-template "{country} {state} {city} Track Me"
+--name-template "[{country} ][{state} ]{city} Track Me"
 ```
 
 ## Garmin HTTP 详细日志

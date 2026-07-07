@@ -32,6 +32,8 @@ class TrackMetadata:
     source_device: str | None = None
     display_timezone: str = "UTC"
     display_city: str | None = None
+    display_country: str | None = None
+    display_state: str | None = None
 
 
 @dataclass(frozen=True)
