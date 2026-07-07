@@ -1160,6 +1160,14 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         layout.addWidget(table)
 
+        def enable_interactive_column_resize() -> None:
+            widths = [table.columnWidth(column) for column in range(table.columnCount())]
+            for column, width in enumerate(widths):
+                header.setSectionResizeMode(column, QHeaderView.Interactive)
+                table.setColumnWidth(column, width)
+
+        QTimer.singleShot(0, enable_interactive_column_resize)
+
         confirm_row = QHBoxLayout()
         confirm_row.addWidget(QLabel(self.tr("confirm_text")))
         confirm_input = QLineEdit()
