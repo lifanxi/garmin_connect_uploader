@@ -67,6 +67,10 @@ CSV_TEXT_SHORT = """INDEX,TAG,DATE,TIME,LATITUDE N/S,LONGITUDE E/W,HEIGHT,SPEED,
 1,T,251201,010001,30.0000010N,120.0000010E,1,3.6,80
 """
 
+CSV_TEXT_HEADERLESS = """2,T,251201,000002,30.0000020N,120.0000020E,2,7.2,90
+1,T,251201,000001,30.0000010N,120.0000010E,1,3.6,80
+"""
+
 NMEA_TEXT = """$GPRMC,011052.387,A,3203.7744,N,11848.7084,E,2.25,26.90,230308,,*37
 $GPRMC,011056.387,A,3203.7677,N,11848.7043,E,0.81,162.57,230308,,*0F
 """
@@ -447,6 +451,30 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(track_file.track.metadata.display_timezone, "Asia/Shanghai")
         self.assertEqual(track_file.track.metadata.display_city, "Hangzhou")
         self.assertEqual(track_file.track.metadata.display_name, "Hangzhou Track Me")
+
+    def test_columbus_reader_accepts_headerless_csv(self):
+        path = self._write_csv(CSV_TEXT_HEADERLESS)
+        reader = ColumbusCsvReader()
+
+        self.assertTrue(reader.can_read(path))
+
+        track_file = reader.read(path, FormatOptions())
+
+        self.assertEqual(track_file.track.metadata.point_count, 2)
+        self.assertEqual(track_file.track.points[0].timestamp_utc.second, 1)
+        self.assertEqual(track_file.track.points[0].latitude, 30.000001)
+        self.assertAlmostEqual(track_file.track.points[1].speed_mps, 2.0)
+
+    def test_format_auto_detects_headerless_columbus_csv(self):
+        path = self._write_csv(CSV_TEXT_HEADERLESS, name="headerless.CSV")
+
+        local_track = SyncService().inspect(
+            [path],
+            SyncOptions(format_options=FormatOptions(display_city_name="Hangzhou")),
+        )[0]
+
+        self.assertEqual(local_track.track_file.source_format, "columbus-csv")
+        self.assertEqual(local_track.track_file.track.metadata.point_count, 2)
 
     def test_columbus_reader_can_override_source_timezone(self):
         path = self._write_csv(CSV_TEXT)

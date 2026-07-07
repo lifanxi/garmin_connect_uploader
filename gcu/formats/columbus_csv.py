@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -33,7 +34,7 @@ class ColumbusCsvReader:
                 row = next(csv.reader(handle), None)
         except OSError:
             return False
-        return tuple((cell or "").strip() for cell in (row or ()))[:9] == self.expected_header
+        return self._is_expected_header(row) or self._looks_like_data_row(row)
 
     def read(self, path: Path, options: FormatOptions) -> TrackFile:
         warnings: list[str] = []
@@ -41,10 +42,18 @@ class ColumbusCsvReader:
         source_tz = ZoneInfo(options.timezone_name)
 
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for line_number, row in enumerate(reader, start=2):
+            reader = csv.reader(handle)
+            first_row = next(reader, None)
+            if self._is_expected_header(first_row):
+                rows = reader
+                start_line = 2
+            else:
+                rows = chain([first_row], reader)
+                start_line = 1
+
+            for line_number, row in enumerate(rows, start=start_line):
                 try:
-                    point = self._parse_row(row, source_tz)
+                    point = self._parse_row(self._row_to_dict(row), source_tz)
                 except (KeyError, TypeError, ValueError) as exc:
                     warnings.append(f"line {line_number}: skipped invalid row: {exc}")
                     continue
@@ -88,6 +97,31 @@ class ColumbusCsvReader:
             track=Track(points=tuple(points), metadata=metadata),
             warnings=tuple(warnings),
         )
+
+    def _is_expected_header(self, row: list[str] | None) -> bool:
+        return tuple((cell or "").strip() for cell in (row or ()))[:9] == self.expected_header
+
+    def _looks_like_data_row(self, row: list[str] | None) -> bool:
+        if row is None or len(row) < len(self.expected_header):
+            return False
+        values = [(cell or "").strip() for cell in row]
+        try:
+            self._parse_datetime(values[2], values[3], ZoneInfo("UTC"))
+            self._parse_coordinate(values[4])
+            self._parse_coordinate(values[5])
+            for value in values[6:9]:
+                if value:
+                    float(value)
+        except ValueError:
+            return False
+        return True
+
+    def _row_to_dict(self, row: list[str] | None) -> dict[str, str]:
+        values = row or []
+        return {
+            header: values[index] if index < len(values) else ""
+            for index, header in enumerate(self.expected_header)
+        }
 
     def _parse_row(self, row: dict[str, str], source_tz: ZoneInfo) -> TrackPoint:
         local_dt = self._parse_datetime(row["DATE"].strip(), row["TIME"].strip(), source_tz)
