@@ -137,6 +137,7 @@ class ErrorDialog(QDialog):
 SESSION_DIR = Path(".garth_session")
 SESSION_META_FILE = ACCOUNT_HINT_FILE
 LEGACY_SESSION_META_FILE = "gcu_session.json"
+SETTINGS_FILE = Path("settings.yaml")
 PURGE_CHUNK_DAYS = 366
 FILE_COLUMN = 0
 START_UTC_COLUMN = 1
@@ -266,7 +267,7 @@ TRANSLATIONS = {
         "deleting_signed": "Deleting signed activities",
         "deleting_activities": "Deleting activities",
         "confirm_purge": "Confirm purge",
-        "confirm_purge_text": "The following uploaded tracks will be deleted. Type DELETE to continue.",
+        "confirm_purge_text": "The uploaded tracks above will be deleted. Type DELETE below to continue:",
         "purge_include_unsigned": "Include activities not uploaded by this tool",
         "purge_unsigned_warning": "This operation will delete all Garmin Connect activities in the selected date range, including activities not uploaded by this tool.",
         "confirm_text": "Confirm",
@@ -459,7 +460,7 @@ TRANSLATIONS = {
         "deleting_signed": "正在删除签名活动",
         "deleting_activities": "正在删除活动",
         "confirm_purge": "确认清理",
-        "confirm_purge_text": "以下已上传轨迹将被删除。输入 DELETE 以继续。",
+        "confirm_purge_text": "以上已上传轨迹将被删除，请在下输入 DELETE 以继续：",
         "purge_include_unsigned": "包含非本工具上传的活动",
         "purge_unsigned_warning": "本操作会清理掉 Garmin Connect 上指定时间区间中所有的活动，包括非本工具上传的活动。",
         "confirm_text": "确认",
@@ -742,6 +743,51 @@ def _save_saved_domain(domain: str, session_dir: Path = SESSION_DIR) -> None:
         pass
 
 
+def _load_gui_name_settings(path: Path = SETTINGS_FILE) -> GuiNameSettings:
+    try:
+        payload = _load_simple_yaml(path)
+    except OSError:
+        return GuiNameSettings()
+    return GuiNameSettings(
+        home_city=str(payload.get("home_city") or ""),
+        name_template=str(payload.get("name_template") or ""),
+    )
+
+
+def _save_gui_name_settings(settings: GuiNameSettings, path: Path = SETTINGS_FILE) -> None:
+    try:
+        path.write_text(
+            "\n".join(
+                [
+                    f"home_city: {json.dumps(settings.home_city, ensure_ascii=False)}",
+                    f"name_template: {json.dumps(settings.name_template, ensure_ascii=False)}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _load_simple_yaml(path: Path) -> dict[str, str]:
+    payload: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value
+        if isinstance(parsed, str):
+            payload[key] = parsed
+    return payload
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -755,13 +801,12 @@ class MainWindow(QMainWindow):
         self._active_tasks = 0
         self._workers: list[TaskWorker] = []
         self._authenticated = False
-        self._sort_after_sync_done = False
         self._inspect_task_running = False
         self._inspect_cancel_requested = False
         self._sync_task_running = False
         self._sync_cancel_requested = False
         self._queued_plan_snapshot: dict[Path, tuple[str, str | None]] = {}
-        self._name_settings = GuiNameSettings()
+        self._name_settings = _load_gui_name_settings()
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -1009,6 +1054,7 @@ class MainWindow(QMainWindow):
     def _remove_paths_from_table(self, paths: set[Path]) -> int:
         if not paths:
             return 0
+        self._clear_files_table_sort()
         self.files = [path for path in self.files if path not in paths]
         self.local_tracks = [
             track
@@ -1029,27 +1075,34 @@ class MainWindow(QMainWindow):
         for row in sorted(rows, reverse=True):
             self.files_table.removeRow(row)
         self.files_table.setSortingEnabled(sorting_enabled)
-        if sorting_enabled:
-            self.files_table.sortByColumn(START_UTC_COLUMN, Qt.AscendingOrder)
+        self.files = self._table_files()
         return len(rows)
 
     def _clear_files(self) -> None:
+        self._clear_files_table_sort()
         self.files = []
         self.local_tracks = []
         self._local_track_cache = {}
         self._render_file_paths()
 
     def _clear_inspect_results(self) -> None:
+        self._clear_files_table_sort()
         self.local_tracks = []
         self._local_track_cache = {}
         self._queued_plan_snapshot = {}
-        for row in range(self.files_table.rowCount()):
-            self._set_table_values(
-                self.files_table,
-                row,
-                START_UTC_COLUMN,
-                ["", "", "", "", "", "", "", "", "", ""],
-            )
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        try:
+            self.files_table.setRowCount(len(self.files))
+            for row, path in enumerate(self.files):
+                self._set_row(
+                    self.files_table,
+                    row,
+                    [path.name, "", "", "", "", "", "", "", "", "", ""],
+                    source_path=path,
+                )
+        finally:
+            self.files_table.setSortingEnabled(sorting_enabled)
 
     def _render_file_paths(self) -> None:
         sorting_enabled = self.files_table.isSortingEnabled()
@@ -1079,6 +1132,7 @@ class MainWindow(QMainWindow):
             return
         self._inspect_task_running = True
         self._inspect_cancel_requested = False
+        self._clear_files_table_sort()
         options = self._sync_options(dry_run=True)
         files = self._table_files()
         precheck_local = self.tr("precheck_local", count=len(files))
@@ -1111,9 +1165,9 @@ class MainWindow(QMainWindow):
             return
         if not self._require_files():
             return
-        self._sort_after_sync_done = False
         options = self._sync_options(dry_run=False)
         settings = self._garmin_settings()
+        self._clear_files_table_sort()
         files = self._runnable_plan_files()
         if not files:
             message = self.tr("no_runnable_plans")
@@ -1203,6 +1257,7 @@ class MainWindow(QMainWindow):
             )
             if next_settings != self._name_settings:
                 self._name_settings = next_settings
+                _save_gui_name_settings(next_settings)
                 self._clear_inspect_results()
 
     def _show_backup_dialog(self) -> None:
@@ -1329,8 +1384,6 @@ class MainWindow(QMainWindow):
         dates.addStretch(1)
         layout.addLayout(dates)
 
-        layout.addWidget(QLabel(self.tr("confirm_purge_text")))
-
         table = QTableWidget(0, 4)
         table.setHorizontalHeaderLabels(
             [
@@ -1358,8 +1411,9 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, enable_interactive_column_resize)
 
+        layout.addWidget(QLabel(self.tr("confirm_purge_text")))
+
         confirm_row = QHBoxLayout()
-        confirm_row.addWidget(QLabel(self.tr("confirm_text")))
         confirm_input = QLineEdit()
         confirm_row.addWidget(confirm_input)
         layout.addLayout(confirm_row)
@@ -1681,7 +1735,6 @@ class MainWindow(QMainWindow):
 
     def _inspect_and_plan(self, tracks: list[LocalTrack], options: SyncOptions) -> None:
         settings = self._garmin_settings()
-        self._sort_after_sync_done = True
         waiting_plan = self.tr("waiting_plan")
         connect_garmin = self.tr("connect_garmin")
         query_remote = self.tr("query_remote")
@@ -1804,9 +1857,6 @@ class MainWindow(QMainWindow):
         if was_canceled:
             self.statusBar().showMessage(self.tr("run_stopped"))
             self._append_status_log(self.tr("run_stopped"))
-        if getattr(self, "_sort_after_sync_done", False):
-            self.files_table.sortItems(START_UTC_COLUMN, Qt.AscendingOrder)
-            self._sort_after_sync_done = False
 
     def _on_sync_error(self, message: str) -> None:
         self._sync_task_running = False
@@ -1823,9 +1873,6 @@ class MainWindow(QMainWindow):
         message = _format_decision_summary(decisions, self.tr, plan=True)
         self.statusBar().showMessage(message)
         self._append_status_log(message)
-        if getattr(self, "_sort_after_sync_done", False):
-            self.files_table.sortItems(START_UTC_COLUMN, Qt.AscendingOrder)
-            self._sort_after_sync_done = False
         self._refresh_action_state()
 
     def _on_inspect_canceled(self) -> None:
@@ -2030,6 +2077,15 @@ class MainWindow(QMainWindow):
         if header is None or not hasattr(header, "logicalIndex"):
             return list(range(self.files_table.rowCount()))
         return [header.logicalIndex(visual_row) for visual_row in range(self.files_table.rowCount())]
+
+    def _clear_files_table_sort(self) -> None:
+        self.files = self._table_files()
+        sorting_enabled = self.files_table.isSortingEnabled()
+        self.files_table.setSortingEnabled(False)
+        header = self.files_table.horizontalHeader()
+        if hasattr(header, "setSortIndicator"):
+            header.setSortIndicator(-1, Qt.AscendingOrder)
+        self.files_table.setSortingEnabled(sorting_enabled)
 
     def _completed_plan_files(self) -> set[Path]:
         completed_paths = set()

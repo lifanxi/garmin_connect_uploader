@@ -56,11 +56,13 @@ from gcu.gui.main import (
     _format_backup,
     _format_purge,
     _friendly_error_message,
+    _load_gui_name_settings,
     _localized_decision_message,
     _localized_plan_status,
     _load_saved_domain,
     _normalize_domain,
     _numeric_sort_value,
+    _save_gui_name_settings,
     _save_saved_domain,
 )
 
@@ -338,6 +340,30 @@ class CoreCliTests(unittest.TestCase):
             [Path("/tmp/third.CSV"), Path("/tmp/first.CSV")],
         )
 
+    def test_gui_clear_table_sort_preserves_visible_order_and_clears_indicator(self):
+        harness = FakeMainWindowHarness()
+        first = Path("/tmp/first.CSV")
+        second = Path("/tmp/second.CSV")
+        third = Path("/tmp/third.CSV")
+        harness.files = [first, second, third]
+        harness.files_table = FakeTable(
+            [
+                {FILE_COLUMN: FakeItem(str(first))},
+                {FILE_COLUMN: FakeItem(str(second))},
+                {FILE_COLUMN: FakeItem(str(third))},
+            ],
+            visual_order=[2, 0, 1],
+            sort_indicator_section=START_UTC_COLUMN,
+        )
+        harness.files_table.setSortingEnabled(True)
+
+        MainWindow._clear_files_table_sort(harness)
+
+        self.assertEqual(harness.files, [third, first, second])
+        self.assertEqual(MainWindow._table_files(harness), [third, first, second])
+        self.assertEqual(harness.files_table.horizontalHeader().sort_indicator_section, -1)
+        self.assertTrue(harness.files_table.isSortingEnabled())
+
     def test_gui_sync_options_include_name_settings_when_non_empty(self):
         harness = FakeMainWindowHarness()
         harness._name_settings = gui_main.GuiNameSettings()
@@ -354,6 +380,27 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertEqual(configured_options.home_city, "Hangzhou")
         self.assertEqual(configured_options.name_template, "[{country} ][{state} ]{city} Track Me")
+
+    def test_gui_name_settings_round_trip_to_yaml_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yaml"
+            settings = gui_main.GuiNameSettings(
+                home_city="Hangzhou",
+                name_template="[{country} ][{state} ]{city}: Track Me",
+            )
+
+            _save_gui_name_settings(settings, path)
+            loaded = _load_gui_name_settings(path)
+
+        self.assertEqual(loaded, settings)
+
+    def test_gui_name_settings_default_when_file_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yaml"
+
+            loaded = _load_gui_name_settings(path)
+
+        self.assertEqual(loaded, gui_main.GuiNameSettings())
 
     def test_gui_clear_inspect_results_keeps_files_and_clears_cached_plans(self):
         harness = FakeMainWindowHarness()
@@ -383,6 +430,61 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(harness.files_table.item(0, START_UTC_COLUMN).text(), "")
         self.assertEqual(harness.files_table.item(0, PLAN_COLUMN).text(), "")
         self.assertEqual(harness.files_table.item(0, NAME_COLUMN).text(), "")
+
+    def test_gui_clear_inspect_results_keeps_current_table_order(self):
+        harness = FakeMainWindowHarness()
+        first = Path("/tmp/first.CSV")
+        second = Path("/tmp/second.CSV")
+        third = Path("/tmp/third.CSV")
+        harness.files = [first, second, third]
+        harness.local_tracks = [object()]
+        harness._local_track_cache = {first: object(), second: object()}
+        harness._queued_plan_snapshot = {third: ("upload", "Queued")}
+        harness.files_table = FakeTable(
+            [
+                {FILE_COLUMN: FakeItem(str(first)), START_UTC_COLUMN: FakeItem("2026-01-01T00:00:00Z")},
+                {FILE_COLUMN: FakeItem(str(second)), START_UTC_COLUMN: FakeItem("2026-01-02T00:00:00Z")},
+                {FILE_COLUMN: FakeItem(str(third)), START_UTC_COLUMN: FakeItem("2026-01-03T00:00:00Z")},
+            ],
+            visual_order=[2, 0, 1],
+        )
+
+        MainWindow._clear_inspect_results(harness)
+
+        self.assertEqual(harness.files, [third, first, second])
+        self.assertEqual(MainWindow._table_files(harness), [third, first, second])
+        self.assertEqual(harness.local_tracks, [])
+        self.assertEqual(harness._local_track_cache, {})
+        self.assertEqual(harness._queued_plan_snapshot, {})
+        self.assertEqual(harness.files_table.item(0, START_UTC_COLUMN).text(), "")
+        self.assertEqual(harness.files_table.item(1, START_UTC_COLUMN).text(), "")
+        self.assertEqual(harness.files_table.item(2, START_UTC_COLUMN).text(), "")
+
+    def test_gui_remove_paths_preserves_remaining_table_order(self):
+        harness = FakeMainWindowHarness()
+        first = Path("/tmp/first.CSV")
+        second = Path("/tmp/second.CSV")
+        third = Path("/tmp/third.CSV")
+        harness.files = [first, second, third]
+        harness.local_tracks = []
+        harness._local_track_cache = {first: object(), second: object(), third: object()}
+        harness.files_table = FakeTable(
+            [
+                {FILE_COLUMN: FakeItem(str(first)), PLAN_COLUMN: FakeItem(status="upload")},
+                {FILE_COLUMN: FakeItem(str(second)), PLAN_COLUMN: FakeItem(status="upload")},
+                {FILE_COLUMN: FakeItem(str(third)), PLAN_COLUMN: FakeItem(status="upload")},
+            ],
+            visual_order=[2, 0, 1],
+        )
+
+        removed = MainWindow._remove_paths_from_table(harness, {first})
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(harness.files, [third, second])
+        self.assertEqual(MainWindow._table_files(harness), [third, second])
+        self.assertNotIn(first, harness._local_track_cache)
+        self.assertIn(second, harness._local_track_cache)
+        self.assertIn(third, harness._local_track_cache)
 
     def test_gui_points_column_sorts_as_number(self):
         small = SortableTableItem("20")
@@ -1827,7 +1929,10 @@ class FakeMainWindowHarness:
     _table_files = MainWindow._table_files
     _runnable_plan_files = MainWindow._runnable_plan_files
     _sync_options = MainWindow._sync_options
+    _remove_paths_from_table = MainWindow._remove_paths_from_table
+    _clear_files_table_sort = MainWindow._clear_files_table_sort
     _clear_inspect_results = MainWindow._clear_inspect_results
+    _set_row = MainWindow._set_row
     _set_table_values = MainWindow._set_table_values
 
 
@@ -1865,19 +1970,42 @@ class FakeItem:
 
 
 class FakeTable:
-    def __init__(self, rows, visual_order: list[int] | None = None):
+    def __init__(
+        self,
+        rows,
+        visual_order: list[int] | None = None,
+        sort_indicator_section: int = -1,
+    ):
         self.rows = rows
         self.visual_order = visual_order
         self.sorting_enabled = False
+        self._horizontal_header = FakeHorizontalHeader(self, sort_indicator_section)
 
     def rowCount(self):
         return len(self.rows)
+
+    def setRowCount(self, count):
+        while len(self.rows) < count:
+            self.rows.append({})
+        if len(self.rows) > count:
+            self.rows = self.rows[:count]
+        self.visual_order = None
 
     def item(self, row, column):
         return self.rows[row].get(column)
 
     def setItem(self, row, column, item):
         self.rows[row][column] = item
+
+    def removeRow(self, row):
+        del self.rows[row]
+        if self.visual_order is not None:
+            remaining = []
+            for index in self.visual_order:
+                if index == row:
+                    continue
+                remaining.append(index if index < row else index - 1)
+            self.visual_order = remaining
 
     def isSortingEnabled(self):
         return self.sorting_enabled
@@ -1889,6 +2017,25 @@ class FakeTable:
         if self.visual_order is None:
             return None
         return FakeVerticalHeader(self.visual_order)
+
+    def horizontalHeader(self):
+        return self._horizontal_header
+
+    def clear_sort_indicator(self):
+        if self.visual_order is not None:
+            self.rows = [self.rows[row] for row in self.visual_order]
+            self.visual_order = None
+
+
+class FakeHorizontalHeader:
+    def __init__(self, table: FakeTable, sort_indicator_section: int):
+        self.table = table
+        self.sort_indicator_section = sort_indicator_section
+
+    def setSortIndicator(self, section, order):
+        self.sort_indicator_section = section
+        if section == -1:
+            self.table.clear_sort_indicator()
 
 
 class FakeVerticalHeader:
