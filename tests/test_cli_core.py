@@ -31,7 +31,7 @@ from gcu.formats.fit import FitReader
 from gcu.formats.gpx import GpxReader
 from gcu.formats.nmea_rmc import NmeaRmcReader
 from gcu.formats.timezone_resolver import resolve_display_timezone
-from gcu.export.fit_writer import write_fit
+from gcu.export.fit_writer import patch_fit_device_identity, write_fit
 from gcu.garmin.client import ACCOUNT_HINT_FILE
 from gcu.garmin.client import _classify_upload_error
 from gcu.garmin.client import _extract_activity_files
@@ -972,6 +972,20 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(points[0].speed_mps, 1)
         self.assertEqual(track_file.track.metadata.display_name, "Hangzhou Track Me")
 
+    def test_patch_fit_device_identity_preserves_fit_and_adds_device_identity(self):
+        fit_path = self._write_fit_without_device_identity()
+        patched_path = fit_path.with_name("patched.fit")
+
+        patch_fit_device_identity(fit_path, patched_path)
+
+        original = FitReader().read(fit_path, FormatOptions(display_city_name="Hangzhou"))
+        patched = FitReader().read(patched_path, FormatOptions(display_city_name="Hangzhou"))
+        self.assertNotIn("manufacturer=", original.track.metadata.source_device or "")
+        self.assertIn("manufacturer=39", patched.track.metadata.source_device or "")
+        self.assertIn(f"serial={GCU_DEVICE_ID}", patched.track.metadata.source_device or "")
+        self.assertEqual(patched.track.metadata.point_count, original.track.metadata.point_count)
+        self.assertEqual(patched.track.points[0], original.track.points[0])
+
     def test_fit_reader_uses_activity_start_metadata_when_records_start_later(self):
         csv_path = self._write_csv(CSV_TEXT)
         local_track = SyncService().inspect(
@@ -1589,6 +1603,77 @@ class CoreCliTests(unittest.TestCase):
         self.assertIn("wait-uploaded", events)
         self.assertIn("update-name", events)
 
+    def test_sync_uploads_original_fit_when_device_identity_exists(self):
+        csv_path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect([csv_path], SyncOptions(format_options=FormatOptions()))[0]
+        fit_path = csv_path.with_suffix(".fit")
+        write_fit(local_track.track_file.track, fit_path, local_track.planned_name)
+        fit_track = SyncService().inspect([fit_path], SyncOptions(format_options=FormatOptions()))[0]
+        garmin = ImmediateUploadGarmin(signed=False)
+        events = []
+
+        decisions = SyncService().sync_tracks(
+            [fit_track],
+            garmin,
+            SyncOptions(format_options=FormatOptions()),
+            on_progress=lambda event, track, details: events.append(event),
+        )
+
+        self.assertEqual(decisions[0].status, "upload")
+        self.assertEqual(garmin.uploaded_paths, [fit_path])
+        self.assertNotIn("write-fit", events)
+        self.assertEqual(len(garmin.updated_names), 1)
+
+    def test_sync_updates_original_fit_when_unique_remote_match_has_no_gcu_signature(self):
+        csv_path = self._write_csv(CSV_TEXT)
+        local_track = SyncService().inspect([csv_path], SyncOptions(format_options=FormatOptions()))[0]
+        fit_path = csv_path.with_suffix(".fit")
+        write_fit(local_track.track_file.track, fit_path, local_track.planned_name)
+        fit_track = SyncService().inspect([fit_path], SyncOptions(format_options=FormatOptions()))[0]
+        metadata = fit_track.track_file.track.metadata
+        remote = RemoteActivity(
+            activity_id=888,
+            activity_name="Uploaded original FIT",
+            manufacturer="GARMIN",
+            device_id=1,
+            begin_timestamp_ms=int(metadata.start_time_utc.timestamp() * 1000),
+            start_latitude=metadata.start_latitude,
+            start_longitude=metadata.start_longitude,
+        )
+        garmin = DeferredLookupGarmin(remote)
+
+        decisions = SyncService().sync_tracks(
+            [fit_track],
+            garmin,
+            SyncOptions(format_options=FormatOptions()),
+        )
+
+        self.assertEqual(decisions[0].status, "upload")
+        self.assertEqual(decisions[0].activity_id, 888)
+        self.assertEqual(garmin.updated_name, fit_track.planned_name)
+
+    def test_sync_patches_fit_without_device_identity_before_upload(self):
+        fit_path = self._write_fit_without_device_identity()
+        fit_track = SyncService().inspect([fit_path], SyncOptions(format_options=FormatOptions()))[0]
+        garmin = ImmediateUploadGarmin()
+        events = []
+        output_dir = fit_path.parent / "rendered"
+
+        decisions = SyncService().sync_tracks(
+            [fit_track],
+            garmin,
+            SyncOptions(format_options=FormatOptions(), output_dir=output_dir),
+            on_progress=lambda event, track, details: events.append(event),
+        )
+
+        uploaded_path = output_dir / fit_path.name
+        uploaded = FitReader().read(uploaded_path, FormatOptions(display_city_name="Hangzhou"))
+        self.assertEqual(decisions[0].status, "upload")
+        self.assertEqual(garmin.uploaded_paths, [uploaded_path])
+        self.assertIn("write-fit", events)
+        self.assertIn("manufacturer=39", uploaded.track.metadata.source_device or "")
+        self.assertIn(f"serial={GCU_DEVICE_ID}", uploaded.track.metadata.source_device or "")
+
     def test_upload_with_activity_id_refuses_unsigned_remote_activity(self):
         path = self._write_csv(CSV_TEXT)
         garmin = ImmediateUploadGarmin(signed=False)
@@ -1894,6 +1979,33 @@ class CoreCliTests(unittest.TestCase):
     def _write_csv(self, text: str, name: str = "track.CSV") -> Path:
         return self._write_file(text, name)
 
+    def _write_fit_without_device_identity(self, name: str = "track.fit") -> Path:
+        from fit_tool.fit_file_builder import FitFileBuilder
+        from fit_tool.profile.messages.file_id_message import FileIdMessage
+        from fit_tool.profile.messages.record_message import RecordMessage
+        from fit_tool.profile.profile_type import FileType
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        started = datetime(2025, 12, 1, 0, 0, 1, tzinfo=timezone.utc)
+
+        builder = FitFileBuilder(auto_define=True)
+        file_id = FileIdMessage()
+        file_id.type = FileType.ACTIVITY.value
+        file_id.time_created = int(started.timestamp() * 1000)
+        builder.add(file_id)
+
+        record = RecordMessage()
+        record.timestamp = int(started.timestamp() * 1000)
+        record.position_lat = 30.000001
+        record.position_long = 120.000001
+        record.altitude = 1
+        builder.add(record)
+
+        builder.build().to_file(str(path))
+        return path
+
     def _track_with_place(self, city: str, country: str, state: str) -> Track:
         start = datetime(2025, 12, 1, 0, 0, 0, tzinfo=timezone.utc)
         point = TrackPoint(start, 39.9042, 116.4074)
@@ -2087,12 +2199,14 @@ class ImmediateUploadGarmin:
         self.updated_names: list[str] = []
         self.activities: list[RemoteActivity] = []
         self.upload_count = 0
+        self.uploaded_paths: list[Path] = []
 
     def list_activities(self, start_date, end_date):
         return self.activities
 
     def upload_activity(self, file_path):
         self.upload_count += 1
+        self.uploaded_paths.append(Path(file_path))
         self.next_id += 1
         self.activities.append(
             RemoteActivity(

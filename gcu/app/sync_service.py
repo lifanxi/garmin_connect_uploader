@@ -23,7 +23,7 @@ from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
 from gcu.duplicate.fingerprint import extract_token
 from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
 from gcu.duplicate.remote_index import RemoteActivityIndex
-from gcu.export.fit_writer import write_fit
+from gcu.export.fit_writer import patch_fit_device_identity, write_fit
 from gcu.formats.base import FormatOptions, get_reader
 from gcu.formats.city_resolver import resolve_city_place
 from gcu.garmin.errors import DuplicateUploadError
@@ -200,13 +200,21 @@ class SyncService:
         options: SyncOptions,
         on_progress: ProgressCallback | None,
     ) -> SyncDecision:
-        fit_path = self._fit_path(local_track, options)
+        upload_path = local_track.track_file.source_path
+        upload_is_original_fit = self._original_fit_has_device_identity(local_track)
+        fit_path: Path | None = None
         try:
             try:
-                self._emit_progress(on_progress, "write-fit", local_track)
-                write_fit(local_track.track_file.track, fit_path, activity_name=local_track.planned_name)
+                if not upload_is_original_fit:
+                    fit_path = self._fit_path(local_track, options)
+                    self._emit_progress(on_progress, "write-fit", local_track)
+                    if local_track.track_file.source_format == "fit":
+                        patch_fit_device_identity(local_track.track_file.source_path, fit_path)
+                    else:
+                        write_fit(local_track.track_file.track, fit_path, activity_name=local_track.planned_name)
+                    upload_path = fit_path
                 self._emit_progress(on_progress, "upload", local_track)
-                upload_result = garmin.upload_activity(fit_path)
+                upload_result = garmin.upload_activity(upload_path)
             except DuplicateUploadError:
                 try:
                     self._emit_progress(on_progress, "resolve-conflict", local_track)
@@ -220,7 +228,12 @@ class SyncService:
             wait_s = self._estimated_post_upload_wait_s(local_track, options)
             try:
                 self._emit_progress(on_progress, "wait-uploaded", local_track, activity_id=activity_id, wait_s=wait_s)
-                uploaded_activity = self._wait_for_uploaded_activity(local_track, garmin, wait_s, activity_id)
+                uploaded_activity, uploaded_match_is_unique = self._wait_for_uploaded_activity(
+                    local_track,
+                    garmin,
+                    wait_s,
+                    activity_id,
+                )
             except Exception as exc:
                 return self._failed_decision(local_track, exc, activity_id)
 
@@ -233,7 +246,16 @@ class SyncService:
                     activity_id=activity_id,
                     message=f"uploaded; activity unavailable after {wait_s}s, not tagged",
                 )
-            if not is_gcu_activity(uploaded_activity):
+            if (
+                not is_gcu_activity(uploaded_activity)
+                and not (
+                    upload_is_original_fit
+                    and (
+                        (activity_id is not None and uploaded_activity.activity_id == activity_id)
+                        or uploaded_match_is_unique
+                    )
+                )
+            ):
                 return self._signature_rejected_decision(local_track, uploaded_activity)
 
             activity_id = uploaded_activity.activity_id
@@ -251,7 +273,14 @@ class SyncService:
                 message="uploaded and tagged",
             )
         finally:
-            self._cleanup_fit(fit_path, options)
+            if fit_path is not None:
+                self._cleanup_fit(fit_path, options)
+
+    def _original_fit_has_device_identity(self, local_track: LocalTrack) -> bool:
+        if local_track.track_file.source_format != "fit":
+            return False
+        source_device = local_track.track_file.track.metadata.source_device or ""
+        return "manufacturer=" in source_device and "serial=" in source_device
 
     def _failed_decision(self, local_track: LocalTrack, exc: Exception, activity_id: int | None = None) -> SyncDecision:
         message = str(exc).strip()
@@ -608,11 +637,32 @@ class SyncService:
         garmin: GarminGateway,
         max_wait_s: int,
         activity_id: int | None = None,
-    ) -> RemoteActivity | None:
-        metadata = local_track.track_file.track.metadata
-        local_start_ms = int(metadata.start_time_utc.timestamp() * 1000)
+    ) -> tuple[RemoteActivity | None, bool]:
         started = time.time()
         delays = [1, 2, 3, 5, 5, 5, 5]
+
+        while True:
+            matches = self._find_uploaded_activity_candidates(local_track, garmin, activity_id)
+            if activity_id is not None and matches:
+                return matches[0], True
+            if len(matches) == 1:
+                return matches[0], True
+            elapsed = time.time() - started
+            delay = delays[0] if delays else 5
+            if elapsed + delay > max_wait_s:
+                return None, False
+            time.sleep(delay)
+            if delays:
+                delays = delays[1:]
+
+    def _find_uploaded_activity_candidates(
+        self,
+        local_track: LocalTrack,
+        garmin: GarminGateway,
+        activity_id: int | None = None,
+    ) -> list[RemoteActivity]:
+        metadata = local_track.track_file.track.metadata
+        local_start_ms = int(metadata.start_time_utc.timestamp() * 1000)
 
         def matches_track(activity: RemoteActivity) -> bool:
             if activity.begin_timestamp_ms is None:
@@ -628,19 +678,10 @@ class SyncService:
                 and lon_diff <= self._default_post_upload_coord_tolerance_deg
             )
 
-        while True:
-            for activity in self._list_nearby_activities(local_track, garmin):
-                if activity_id is not None and activity.activity_id == activity_id:
-                    return activity
-                if matches_track(activity):
-                    return activity
-            elapsed = time.time() - started
-            delay = delays[0] if delays else 5
-            if elapsed + delay > max_wait_s:
-                return None
-            time.sleep(delay)
-            if delays:
-                delays = delays[1:]
+        activities = self._list_nearby_activities(local_track, garmin)
+        if activity_id is not None:
+            return [activity for activity in activities if activity.activity_id == activity_id]
+        return [activity for activity in activities if matches_track(activity)]
 
     def _list_nearby_activities(
         self,

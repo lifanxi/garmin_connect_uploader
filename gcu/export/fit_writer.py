@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from gcu.app.models import Track
+from gcu.garmin.signature import GCU_DEVICE_ID
 
 
 _FIT_ALTITUDE_SCALE = 5.0
@@ -132,3 +133,52 @@ def write_fit(track: Track, output_path: Path, activity_name: str | None = None)
     fit_file = builder.build()
     fit_file.to_file(str(output_path))
     return output_path
+
+
+def patch_fit_device_identity(source_path: Path, output_path: Path) -> Path:
+    try:
+        from fit_tool.fit_file import FitFile
+        from fit_tool.fit_file_header import FitFileHeader
+        from fit_tool.profile.profile_type import Manufacturer
+    except ImportError as exc:
+        raise RuntimeError("FIT export requires fit-tool. Install it with: pip install fit-tool") from exc
+
+    fit_file = FitFile.from_file(str(source_path))
+    file_id = None
+    for record in fit_file.records:
+        message = record.message
+        if type(message).__name__ == "FileIdMessage":
+            file_id = message
+            break
+    if file_id is None:
+        raise ValueError(f"No FIT file_id message found in {source_path}")
+
+    _set_fit_field(file_id, "manufacturer", Manufacturer.HOLUX.value)
+    _set_fit_field(file_id, "product", 0)
+    _set_fit_field(file_id, "serial_number", GCU_DEVICE_ID)
+
+    fit_file.header.records_size = sum(len(record.to_bytes()) for record in fit_file.records)
+    if fit_file.header.crc is not None:
+        fit_file.header.crc = FitFileHeader.generate_crc(
+            fit_file.header.protocol_version,
+            fit_file.header.profile_version,
+            fit_file.header.records_size,
+        )
+    fit_file.crc = None
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fit_file.to_file(str(output_path))
+    return output_path
+
+
+def _set_fit_field(message: object, name: str, value: object) -> None:
+    from fit_tool.field_definition import FieldDefinition
+
+    field = message.get_field_by_name(name)
+    if field is None:
+        raise ValueError(f"FIT file_id message does not support {name}")
+    field.growable = True
+    setattr(message, name, value)
+    definition = message.definition_message
+    if definition is not None and definition.get_field_definition(field.field_id) is None:
+        definition.add_field_definition(FieldDefinition.from_field(field))
