@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+import zipfile
+from dataclasses import dataclass
+from io import BytesIO
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +25,13 @@ GARMIN_WEB_USER_AGENT = (
 
 ACCOUNT_HINT_FILE = "gcu_account.json"
 EMAIL_KEYS = ("email", "emailAddress", "email_address", "userEmail", "user_email", "primaryEmail", "primary_email")
+VALID_BACKUP_EXTENSIONS = {".tcx", ".fit", ".gpx", ".xls", ".xlsx", ".csv", ".xml", ".zip"}
+
+
+@dataclass(frozen=True)
+class DownloadedActivityFile:
+    filename: str
+    data: bytes
 
 
 class GarminClient:
@@ -132,6 +143,21 @@ class GarminClient:
             f"/activity-service/activity/{activity_id}",
             method="DELETE",
         )
+
+    def download_activity_files(self, activity_id: int) -> list[DownloadedActivityFile]:
+        response = self.client.request(
+            "GET",
+            "connectapi",
+            f"/download-service/files/activity/{activity_id}",
+            api=True,
+        )
+        files = _extract_activity_files(
+            response.content,
+            fallback_filename=_filename_from_content_disposition(response.headers.get("content-disposition", "")),
+        )
+        if not files:
+            raise RuntimeError(f"Downloaded activity {activity_id} did not contain a supported track file")
+        return files
 
     def ping(self) -> None:
         today = date.today()
@@ -251,6 +277,59 @@ def _extract_activity_id(raw: Any) -> int | None:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _looks_like_fit(data: bytes) -> bool:
+    return len(data) >= 12 and data[8:12] == b".FIT"
+
+
+def _extract_activity_files(
+    data: bytes,
+    fallback_filename: str | None = None,
+    depth: int = 0,
+) -> list[DownloadedActivityFile]:
+    filename = Path(fallback_filename or "").name
+    if depth > 2:
+        return []
+    archive = BytesIO(data)
+    if not zipfile.is_zipfile(archive):
+        if _is_valid_backup_filename(filename):
+            return [DownloadedActivityFile(filename=filename, data=data)]
+        if _looks_like_fit(data):
+            return [DownloadedActivityFile(filename=filename or "activity.fit", data=data)]
+        return []
+    archive.seek(0)
+    files: list[DownloadedActivityFile] = []
+    with zipfile.ZipFile(archive) as zip_file:
+        infos = sorted(
+            (info for info in zip_file.infolist() if not info.is_dir()),
+            key=lambda info: info.file_size,
+            reverse=True,
+        )
+        if len(infos) > 1:
+            return [DownloadedActivityFile(filename=filename or "activity.zip", data=data)]
+        for info in infos:
+            filename = Path(info.filename).name
+            if not _is_valid_backup_filename(filename):
+                continue
+            payload = zip_file.read(info.filename)
+            files.append(DownloadedActivityFile(filename=filename, data=payload))
+        if files:
+            return files
+        for info in infos:
+            files.extend(_extract_activity_files(zip_file.read(info.filename), depth=depth + 1))
+    return files
+
+
+def _is_valid_backup_filename(filename: str) -> bool:
+    return Path(filename).suffix.lower() in VALID_BACKUP_EXTENSIONS
+
+
+def _filename_from_content_disposition(value: str) -> str | None:
+    match = re.search(r"filename\\*?=(?:UTF-8''|\"?)(?P<filename>[^\";]+)", value, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return Path(match.group("filename").strip()).name or None
 
 
 def _int_or_none(value: Any) -> int | None:

@@ -11,7 +11,7 @@ stable tokens to avoid duplicate uploads.
 ## Features
 
 - Desktop GUI built with PySide6.
-- CLI for scripting, batch sync, conversion, purge, and diagnostics.
+- CLI for scripting, batch sync, conversion, backup, purge, and diagnostics.
 - Columbus CSV, GPX, FIT, and NMEA RMC input support.
 - FIT activity generation with a stable tool device signature.
 - Duplicate detection by stable `[gcu:v1:...]` activity-name tokens.
@@ -20,7 +20,7 @@ stable tokens to avoid duplicate uploads.
   and parse errors.
 - Per-file task states in the GUI: upload, skip, backfill Token, conflict,
   queued, uploading, and completed.
-- Safe purge of activities uploaded by this tool only.
+- Safe purge of activities uploaded by this tool only by default.
 - Automatic display timezone and city resolution from track coordinates.
 - Windows installer build with bundled Python runtime and dependencies.
 
@@ -79,9 +79,11 @@ manufacturer = HOLUX
 deviceId = 0x12345678
 ```
 
-Destructive or modifying operations, such as purge and edits to activities
+Destructive or modifying operations, such as CLI purge and edits to activities
 identified as this tool's uploads, check this signature before changing remote
-activities. Unsigned activities are not deleted by purge.
+activities. CLI purge only deletes signed activities. In the GUI maintenance
+dialog, unsigned activities can only be included after selecting the explicit
+option and accepting an additional warning.
 
 ## Installation For Development
 
@@ -117,13 +119,13 @@ The GUI is a single-window workflow:
 
 - Login is at the top.
 - File management and inspection/upload actions are in the middle.
-- Cleanup is at the bottom.
+- Maintenance actions are at the bottom.
 - A shared status log is shown at the bottom of the window.
 
 On startup, the GUI checks `.garth_session` in the current working directory. If
-a valid Garmin session exists, the login area stays locked and file/cleanup
-actions are enabled. If not, file and cleanup actions stay disabled until login
-succeeds.
+a valid Garmin session exists, the login area stays locked and file/maintenance
+actions are enabled. If not, file and maintenance actions stay disabled until
+login succeeds.
 
 The domain selector supports:
 
@@ -163,9 +165,15 @@ exits the remaining queue.
 Use **Clear Completed** to remove completed or skipped rows from the table while
 leaving problem rows for review.
 
+Use **Backup** to download Garmin Connect activities in a selected date range.
+The backup dialog can include activities uploaded by this tool, activities not
+uploaded by this tool, or both.
+
 Use **Clean Uploaded Tracks** to delete remote activities uploaded by this tool.
 The GUI previews matching activities in a confirmation dialog, and deletion
-requires typing `DELETE`.
+requires typing `DELETE`. The dialog also has an unchecked option to include
+activities not uploaded by this tool; enabling it requires accepting an
+additional warning before scanning.
 
 ## CLI Usage
 
@@ -289,6 +297,22 @@ Limit by date or scan in smaller windows:
 ```bash
 python gcu_cli.py purge --dry-run --start-date 2025-01-01 --end-date 2026-07-01
 python gcu_cli.py purge --yes --chunk-days 31
+```
+
+### Backup Activities
+
+Download Garmin Connect activities as original track files. If Garmin returns a
+ZIP archive with one supported file, that file is saved with its original
+format; if the ZIP contains multiple files, the original ZIP is preserved.
+Supported track formats are `.tcx`, `.fit`, `.gpx`, `.xls`, `.xlsx`, `.csv`,
+and `.xml`; multi-file archives are saved as `.zip`. Output filenames use
+`YYYYMMDD_HHMMSS_activityId_activityName.ext`; unsupported filename characters
+and GCU tokens in activity names are removed from the saved filename.
+
+```bash
+python gcu_cli.py backup --domain garmin.cn --start-date 2025-01-01 --end-date 2026-07-01 --output-dir garmin-backup
+python gcu_cli.py backup --domain garmin.cn --include gcu --output-dir garmin-backup
+python gcu_cli.py backup --domain garmin.cn --include non-gcu --output-dir garmin-backup
 ```
 
 ## Naming, Timezone, And City

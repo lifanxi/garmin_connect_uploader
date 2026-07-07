@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -11,12 +13,12 @@ from requests import Response
 from requests import Session
 from requests import Request
 
-from gcu.app.models import FileCheckError, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision, UploadResult
+from gcu.app.models import BackupDecision, BackupSummary, FileCheckError, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision, UploadResult
 from gcu.app.models import Track
 from gcu.app.models import TrackMetadata
 from gcu.app.models import TrackPoint
 from gcu.app.precheck_service import PrecheckService
-from gcu.app.sync_service import SyncOptions, SyncService
+from gcu.app.sync_service import SyncOptions, SyncService, _backup_activity_filename
 from gcu.cli.main import _existing_files
 from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
 from gcu.duplicate.matcher import MatchOptions, find_legacy_matches
@@ -31,6 +33,7 @@ from gcu.formats.timezone_resolver import resolve_display_timezone
 from gcu.export.fit_writer import write_fit
 from gcu.garmin.client import ACCOUNT_HINT_FILE
 from gcu.garmin.client import _classify_upload_error
+from gcu.garmin.client import _extract_activity_files
 from gcu.garmin.client import _extract_email
 from gcu.garmin.client import GARMIN_WEB_USER_AGENT, GarminClient
 from gcu.garmin.errors import DuplicateUploadError, UploadConsentRequiredError
@@ -47,6 +50,7 @@ from gcu.gui.main import (
     TRANSLATIONS,
     _decision_display_name,
     _format_decision_summary,
+    _format_backup,
     _format_purge,
     _friendly_error_message,
     _localized_decision_message,
@@ -277,6 +281,39 @@ class CoreCliTests(unittest.TestCase):
 
         self.assertIn("deleted: 1", deleted)
         self.assertNotIn("deleted activity=123", deleted)
+
+    def test_gui_backup_summary_includes_failures(self):
+        tr = lambda key, **kwargs: TRANSLATIONS["en"][key].format(**kwargs) if kwargs else TRANSLATIONS["en"][key]
+        summary = BackupSummary(
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 31),
+            scanned_count=2,
+            matched_count=2,
+            downloaded_count=1,
+            skipped_count=0,
+            output_dir=Path("backup"),
+            decisions=(
+                BackupDecision(
+                    activity_id=123,
+                    activity_name="Downloaded",
+                    status="downloaded",
+                    output_path=Path("backup/a.fit"),
+                ),
+                BackupDecision(
+                    activity_id=456,
+                    activity_name="Failed",
+                    status="failed",
+                    message="not available",
+                ),
+            ),
+        )
+
+        preview = _format_backup(summary, tr, include_details=False)
+        detail = _format_backup(summary, tr)
+
+        self.assertIn("failed 1", preview)
+        self.assertIn("Failed: 1", detail)
+        self.assertIn("failed activity=456", detail)
 
     def test_gui_uses_current_table_order_for_check_and_run(self):
         harness = FakeMainWindowHarness()
@@ -1408,6 +1445,152 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(summary.deleted_count, 1)
         self.assertEqual(summary.skipped_unsigned_count, 1)
 
+    def test_purge_can_delete_unsigned_activities_when_explicitly_enabled(self):
+        signed = RemoteActivity(
+            activity_id=901,
+            activity_name="GCU activity",
+            manufacturer=GCU_MANUFACTURER,
+            device_id=GCU_DEVICE_ID,
+        )
+        unsigned = RemoteActivity(
+            activity_id=902,
+            activity_name="External activity",
+            manufacturer="GARMIN",
+            device_id=1,
+        )
+        garmin = PurgeGarmin([signed, unsigned])
+
+        summary = SyncService().purge(
+            garmin,
+            start_date=date(1970, 1, 1),
+            end_date=date(2026, 7, 1),
+            dry_run=False,
+            include_unsigned=True,
+        )
+
+        self.assertEqual(garmin.deleted_ids, [901, 902])
+        self.assertEqual(summary.scanned_count, 2)
+        self.assertEqual(summary.matched_count, 2)
+        self.assertEqual(summary.deleted_count, 2)
+        self.assertEqual(summary.skipped_unsigned_count, 0)
+
+    def test_backup_downloads_selected_activity_types(self):
+        signed = RemoteActivity(
+            activity_id=901,
+            activity_name="GCU activity",
+            begin_timestamp_ms=int(datetime(2025, 12, 1, tzinfo=timezone.utc).timestamp() * 1000),
+            manufacturer=GCU_MANUFACTURER,
+            device_id=GCU_DEVICE_ID,
+        )
+        unsigned = RemoteActivity(
+            activity_id=902,
+            activity_name="External activity",
+            begin_timestamp_ms=int(datetime(2025, 12, 2, tzinfo=timezone.utc).timestamp() * 1000),
+            manufacturer="GARMIN",
+            device_id=1,
+        )
+        garmin = BackupGarmin([signed, unsigned])
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+
+        summary = SyncService().backup(
+            garmin,
+            start_date=date(2025, 12, 1),
+            end_date=date(2025, 12, 31),
+            output_dir=Path(directory.name),
+            include_gcu=False,
+            include_non_gcu=True,
+        )
+
+        self.assertEqual(summary.scanned_count, 2)
+        self.assertEqual(summary.matched_count, 1)
+        self.assertEqual(summary.downloaded_count, 1)
+        self.assertEqual(summary.skipped_count, 1)
+        self.assertEqual(garmin.downloaded_ids, [902])
+        self.assertEqual(summary.decisions[0].status, "downloaded")
+        self.assertEqual(summary.decisions[0].output_path.read_bytes(), b"track-bytes-902")
+        self.assertEqual(summary.decisions[0].output_path.name, "20251202_000000_902_External_activity.gpx")
+        self.assertEqual(summary.decisions[0].output_path.suffix, ".gpx")
+
+    def test_backup_filename_sanitizes_activity_name(self):
+        activity = RemoteActivity(
+            activity_id=123,
+            activity_name='Track: Me / Morning? <A>* "B"',
+            begin_timestamp_ms=int(datetime(2025, 12, 2, 3, 4, 5, tzinfo=timezone.utc).timestamp() * 1000),
+        )
+
+        self.assertEqual(
+            _backup_activity_filename(activity, "123_ACTIVITY.tcx"),
+            "20251202_030405_123_Track_Me_Morning_A_B.tcx",
+        )
+
+    def test_backup_filename_omits_gcu_token(self):
+        activity = RemoteActivity(
+            activity_id=123,
+            activity_name="Track Me [gcu:v1:f3cc90cbed821b45]",
+            begin_timestamp_ms=int(datetime(2025, 12, 2, 3, 4, 5, tzinfo=timezone.utc).timestamp() * 1000),
+        )
+
+        self.assertEqual(
+            _backup_activity_filename(activity, "123_ACTIVITY.tcx"),
+            "20251202_030405_123_Track_Me.tcx",
+        )
+
+    def test_backup_filename_avoids_windows_reserved_names(self):
+        activity = RemoteActivity(
+            activity_id=123,
+            activity_name="CON",
+            begin_timestamp_ms=int(datetime(2025, 12, 2, 3, 4, 5, tzinfo=timezone.utc).timestamp() * 1000),
+        )
+
+        self.assertEqual(
+            _backup_activity_filename(activity, "123_ACTIVITY.fit"),
+            "20251202_030405_123__CON.fit",
+        )
+
+    def test_garmin_download_extracts_single_supported_file_from_zip(self):
+        csv_payload = b"time,lat,lon\n"
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("fitbit.csv", csv_payload)
+
+        files = _extract_activity_files(archive.getvalue())
+
+        self.assertEqual([(item.filename, item.data) for item in files], [("fitbit.csv", csv_payload)])
+
+    def test_garmin_download_extracts_single_file_when_response_name_is_zip(self):
+        fit_payload = b"\x0e\x10\x00\x00\x00\x00\x00\x00.FITpayload"
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("activity.fit", fit_payload)
+
+        files = _extract_activity_files(archive.getvalue(), fallback_filename="original.zip")
+
+        self.assertEqual([(item.filename, item.data) for item in files], [("activity.fit", fit_payload)])
+
+    def test_garmin_download_preserves_zip_with_multiple_files(self):
+        archive = BytesIO()
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("activity.fit", b"\x0e\x10\x00\x00\x00\x00\x00\x00.FITpayload")
+            zip_file.writestr("fitbit.csv", b"time,lat,lon\n")
+
+        files = _extract_activity_files(archive.getvalue(), fallback_filename="original.zip")
+
+        self.assertEqual([(item.filename, item.data) for item in files], [("original.zip", archive.getvalue())])
+
+    def test_garmin_download_preserves_single_nested_zip(self):
+        fit_payload = b"\x0e\x10\x00\x00\x00\x00\x00\x00.FITpayload"
+        inner = BytesIO()
+        with zipfile.ZipFile(inner, "w") as zip_file:
+            zip_file.writestr("activity.fit", fit_payload)
+        outer = BytesIO()
+        with zipfile.ZipFile(outer, "w") as zip_file:
+            zip_file.writestr("activity.zip", inner.getvalue())
+
+        files = _extract_activity_files(outer.getvalue())
+
+        self.assertEqual([(item.filename, item.data) for item in files], [("activity.zip", inner.getvalue())])
+
     def test_upload_consent_error_is_classified(self):
         response = FakeResponse(
             412,
@@ -1629,6 +1812,16 @@ class PurgeGarmin:
 
     def delete_activity(self, activity_id: int):
         self.deleted_ids.append(activity_id)
+
+
+class BackupGarmin(PurgeGarmin):
+    def __init__(self, activities: list[RemoteActivity]):
+        super().__init__(activities)
+        self.downloaded_ids: list[int] = []
+
+    def download_activity_files(self, activity_id: int) -> list[tuple[str, bytes]]:
+        self.downloaded_ids.append(activity_id)
+        return [(f"activity-{activity_id}.gpx", f"track-bytes-{activity_id}".encode("ascii"))]
 
 
 class FakeResponse:

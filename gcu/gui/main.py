@@ -13,6 +13,7 @@ from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from gcu.app.models import (
     AuthenticatedUser,
+    BackupSummary,
     FileCheckError,
     LocalTrack,
     PrecheckReport,
@@ -56,6 +58,15 @@ class GarminSettings:
     session_dir: Path
     username: str
     password: str
+
+
+@dataclass(frozen=True)
+class BackupSettings:
+    start_date: date
+    end_date: date
+    include_gcu: bool
+    include_non_gcu: bool
+    output_dir: Path
 
 
 @dataclass(frozen=True)
@@ -148,7 +159,7 @@ TRANSLATIONS = {
         "title": "Garmin Connect Uploader",
         "nav_login": "Login",
         "nav_files": "Files",
-        "nav_purge": "Purge",
+        "nav_purge": "Maintenance",
         "status_log": "Status",
         "ready": "Ready",
         "domain": "Domain",
@@ -187,6 +198,21 @@ TRANSLATIONS = {
         "end": "End",
         "duration": "Duration",
         "delete_matched": "Clean Uploaded Tracks",
+        "backup": "Backup",
+        "backup_title": "Backup Activities",
+        "backup_text": "Download Garmin Connect activities in the selected date range as original track files.",
+        "backup_type": "Type",
+        "backup_gcu": "Uploaded by this tool",
+        "backup_non_gcu": "Not uploaded by this tool",
+        "backup_target": "Backup target",
+        "browse": "Browse",
+        "backup_target_title": "Choose backup target",
+        "backuping": "Backing up activities",
+        "backup_progress_list": "Listing activities from {start_date} to {end_date}",
+        "backup_progress_download": "Downloading activity {activity_id}: {name}",
+        "backup_progress_downloaded": "Downloaded activity {activity_id}: {path}",
+        "backup_done": "Backup complete: scanned {scanned}, matched {matched}, downloaded {downloaded}, failed {failed}, skipped {skipped}.",
+        "scan_purge": "Scan",
         "recursive_add": "Recursive add",
         "add_folder_recursive": "Add subfolders recursively?",
         "add_track_files": "Add track files",
@@ -228,8 +254,11 @@ TRANSLATIONS = {
         "no_valid_session": "No valid login session. Enter username and password to log in to Garmin Connect.",
         "previewing_purge": "Previewing purge",
         "deleting_signed": "Deleting signed activities",
+        "deleting_activities": "Deleting activities",
         "confirm_purge": "Confirm purge",
         "confirm_purge_text": "The following uploaded tracks will be deleted. Type DELETE to continue.",
+        "purge_include_unsigned": "Include activities not uploaded by this tool",
+        "purge_unsigned_warning": "This operation will delete all Garmin Connect activities in the selected date range, including activities not uploaded by this tool.",
         "confirm_text": "Confirm",
         "no_purge_matches": "No uploaded tracks matched the cleanup criteria.",
         "login_complete": "Login complete.",
@@ -268,6 +297,8 @@ TRANSLATIONS = {
         "decision_no_matching_remote": "No matching remote activity",
         "decision_signed_gcu": "Signed GCU activity",
         "decision_signed_deleted": "Signed GCU activity deleted",
+        "decision_unsigned_activity": "Activity not uploaded by this tool",
+        "decision_unsigned_deleted": "Activity not uploaded by this tool deleted",
         "decision_remote_token_match": "Remote Token match",
         "decision_legacy_has_token": "Matched remote activity already has Token",
         "decision_legacy_match": "Matched remote activity without Token",
@@ -306,6 +337,8 @@ TRANSLATIONS = {
         "skipped_unsigned": "Skipped unsigned",
         "would_delete": "would delete",
         "deleted": "deleted",
+        "downloaded": "downloaded",
+        "skipped": "skipped",
         "first": "first",
         "second": "second",
         "manufacturer": "manufacturer",
@@ -315,7 +348,7 @@ TRANSLATIONS = {
         "title": "Garmin Connect 上传工具",
         "nav_login": "登录",
         "nav_files": "文件",
-        "nav_purge": "清理",
+        "nav_purge": "维护",
         "status_log": "状态",
         "ready": "就绪",
         "domain": "站点",
@@ -354,6 +387,21 @@ TRANSLATIONS = {
         "end": "结束",
         "duration": "时长",
         "delete_matched": "清理已上传轨迹",
+        "backup": "备份",
+        "backup_title": "备份活动",
+        "backup_text": "将所选日期范围内的 Garmin Connect 活动下载为原始轨迹文件。",
+        "backup_type": "类型",
+        "backup_gcu": "本工具上传",
+        "backup_non_gcu": "非工具上传",
+        "backup_target": "备份目标",
+        "browse": "浏览",
+        "backup_target_title": "选择备份目标",
+        "backuping": "正在备份活动",
+        "backup_progress_list": "正在列出 {start_date} 到 {end_date} 的活动",
+        "backup_progress_download": "正在下载活动 {activity_id}: {name}",
+        "backup_progress_downloaded": "已下载活动 {activity_id}: {path}",
+        "backup_done": "备份完成：已扫描 {scanned}，匹配 {matched}，下载 {downloaded}，失败 {failed}，跳过 {skipped}。",
+        "scan_purge": "清理",
         "recursive_add": "递归添加",
         "add_folder_recursive": "是否递归添加子文件夹中的轨迹文件？",
         "add_track_files": "添加轨迹文件",
@@ -395,8 +443,11 @@ TRANSLATIONS = {
         "no_valid_session": "无有效登录凭证，请输入用户名密码登录 Garmin Connect",
         "previewing_purge": "正在预览清理",
         "deleting_signed": "正在删除签名活动",
+        "deleting_activities": "正在删除活动",
         "confirm_purge": "确认清理",
         "confirm_purge_text": "以下已上传轨迹将被删除。输入 DELETE 以继续。",
+        "purge_include_unsigned": "包含非本工具上传的活动",
+        "purge_unsigned_warning": "本操作会清理掉 Garmin Connect 上指定时间区间中所有的活动，包括非本工具上传的活动。",
         "confirm_text": "确认",
         "no_purge_matches": "没有发现符合清理条件的已上传轨迹。",
         "login_complete": "登录完成。",
@@ -435,6 +486,8 @@ TRANSLATIONS = {
         "decision_no_matching_remote": "没有匹配的远端活动",
         "decision_signed_gcu": "已识别为本工具上传的活动",
         "decision_signed_deleted": "已删除本工具上传的活动",
+        "decision_unsigned_activity": "非本工具上传的活动",
+        "decision_unsigned_deleted": "已删除非本工具上传的活动",
         "decision_remote_token_match": "远端 Token 匹配",
         "decision_legacy_has_token": "匹配的远端活动已包含 Token",
         "decision_legacy_match": "匹配到未标记 Token 的远端活动",
@@ -473,6 +526,8 @@ TRANSLATIONS = {
         "skipped_unsigned": "跳过非本工具活动",
         "would_delete": "将删除",
         "deleted": "已删除",
+        "downloaded": "已下载",
+        "skipped": "已跳过",
         "first": "第一条",
         "second": "第二条",
         "manufacturer": "厂商",
@@ -839,21 +894,13 @@ class MainWindow(QMainWindow):
         page.setObjectName("sectionGroup")
         layout = QHBoxLayout(page)
 
-        self.purge_start = QDateEdit()
-        self.purge_start.setCalendarPopup(True)
-        self.purge_start.setDate(date(1970, 1, 1))
-        self.purge_end = QDateEdit()
-        self.purge_end.setCalendarPopup(True)
-        self.purge_end.setDate(date.today())
-
         self.purge_button = QPushButton(self.tr("delete_matched"))
-        layout.addWidget(QLabel(self.tr("start")))
-        layout.addWidget(self.purge_start)
-        layout.addWidget(QLabel(self.tr("end")))
-        layout.addWidget(self.purge_end)
-        layout.addStretch(1)
+        self.backup_button = QPushButton(self.tr("backup"))
+        layout.addWidget(self.backup_button)
         layout.addWidget(self.purge_button)
+        layout.addStretch(1)
 
+        self.backup_button.clicked.connect(self._show_backup_dialog)
         self.purge_button.clicked.connect(self._preview_then_purge)
         return page
 
@@ -1094,41 +1141,133 @@ class MainWindow(QMainWindow):
         self._refresh_action_state()
         self._append_login_log(self.tr("logout_complete"))
 
-    def _preview_then_purge(self) -> None:
-        settings = self._garmin_settings()
-        start_date, end_date = self._purge_settings()
+    def _show_backup_dialog(self) -> None:
+        settings = self._backup_dialog_settings()
+        if settings is None:
+            return
+        garmin_settings = self._garmin_settings()
         self._run_task(
-            self.tr("previewing_purge"),
-            lambda: self._purge_task(settings, start_date, end_date, dry_run=True),
-            lambda summary: self._on_purge_preview_done(summary, settings, start_date, end_date),
+            self.tr("backuping"),
+            lambda emit: self._backup_task(garmin_settings, settings, emit),
+            self._on_backup_done,
+            on_progress=self._on_progress_event,
+            pass_progress=True,
         )
 
-    def _on_purge_preview_done(
-        self,
-        summary: PurgeSummary,
-        settings: GarminSettings,
-        start_date: date,
-        end_date: date,
-    ) -> None:
-        self._append_status_log(_format_purge(summary, self.tr, include_details=False))
-        if not summary.decisions:
-            QMessageBox.information(self, self.tr("confirm_purge"), self.tr("no_purge_matches"))
+    def _backup_dialog_settings(self) -> BackupSettings | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.tr("backup_title"))
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(self.tr("backup_text"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        dates = QHBoxLayout()
+        start_input = QDateEdit()
+        start_input.setCalendarPopup(True)
+        start_input.setDate(date(1970, 1, 1))
+        end_input = QDateEdit()
+        end_input.setCalendarPopup(True)
+        end_input.setDate(date.today())
+        dates.addWidget(QLabel(self.tr("start")))
+        dates.addWidget(start_input)
+        dates.addWidget(QLabel(self.tr("end")))
+        dates.addWidget(end_input)
+        dates.addStretch(1)
+        layout.addLayout(dates)
+
+        type_row = QHBoxLayout()
+        include_gcu = QCheckBox(self.tr("backup_gcu"))
+        include_non_gcu = QCheckBox(self.tr("backup_non_gcu"))
+        include_gcu.setChecked(True)
+        include_non_gcu.setChecked(True)
+        type_row.addWidget(QLabel(self.tr("backup_type")))
+        type_row.addWidget(include_gcu)
+        type_row.addWidget(include_non_gcu)
+        type_row.addStretch(1)
+        layout.addLayout(type_row)
+
+        target_row = QHBoxLayout()
+        target_input = QLineEdit()
+        target_button = QPushButton(self.tr("browse"))
+        target_row.addWidget(QLabel(self.tr("backup_target")))
+        target_row.addWidget(target_input, 1)
+        target_row.addWidget(target_button)
+        layout.addLayout(target_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+
+        def refresh_ok() -> None:
+            ok_button.setEnabled(
+                bool(target_input.text().strip())
+                and (include_gcu.isChecked() or include_non_gcu.isChecked())
+            )
+
+        def choose_target() -> None:
+            folder = QFileDialog.getExistingDirectory(self, self.tr("backup_target_title"), target_input.text().strip())
+            if folder:
+                target_input.setText(folder)
+
+        target_button.clicked.connect(choose_target)
+        target_input.textChanged.connect(refresh_ok)
+        include_gcu.toggled.connect(refresh_ok)
+        include_non_gcu.toggled.connect(refresh_ok)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        refresh_ok()
+        dialog.resize(560, dialog.minimumSizeHint().height())
+
+        if dialog.exec() != QDialog.Accepted:
+            return None
+        return BackupSettings(
+            start_date=start_input.date().toPython(),
+            end_date=end_input.date().toPython(),
+            include_gcu=include_gcu.isChecked(),
+            include_non_gcu=include_non_gcu.isChecked(),
+            output_dir=Path(target_input.text().strip()),
+        )
+
+    def _preview_then_purge(self) -> None:
+        settings = self._garmin_settings()
+        result = self._confirm_purge(settings)
+        if result is None:
             return
-        if not self._confirm_purge(summary):
-            return
+        start_date, end_date, include_unsigned = result
         self._run_task(
-            self.tr("deleting_signed"),
-            lambda: self._purge_task(settings, start_date, end_date, dry_run=False),
+            self.tr("deleting_activities") if include_unsigned else self.tr("deleting_signed"),
+            lambda: self._purge_task(settings, start_date, end_date, dry_run=False, include_unsigned=include_unsigned),
             self._on_purge_done,
         )
 
-    def _confirm_purge(self, summary: PurgeSummary) -> bool:
+    def _confirm_purge(self, settings: GarminSettings) -> tuple[date, date, bool] | None:
         dialog = QDialog(self)
         dialog.setWindowTitle(self.tr("confirm_purge"))
         layout = QVBoxLayout(dialog)
+
+        dates = QHBoxLayout()
+        start_input = QDateEdit()
+        start_input.setCalendarPopup(True)
+        start_input.setDate(date(1970, 1, 1))
+        end_input = QDateEdit()
+        end_input.setCalendarPopup(True)
+        end_input.setDate(date.today())
+        include_unsigned = QCheckBox(self.tr("purge_include_unsigned"))
+        scan_button = QPushButton(self.tr("scan_purge"))
+        dates.addWidget(QLabel(self.tr("start")))
+        dates.addWidget(start_input)
+        dates.addWidget(QLabel(self.tr("end")))
+        dates.addWidget(end_input)
+        dates.addWidget(include_unsigned)
+        dates.addWidget(scan_button)
+        dates.addStretch(1)
+        layout.addLayout(dates)
+
         layout.addWidget(QLabel(self.tr("confirm_purge_text")))
 
-        table = QTableWidget(len(summary.decisions), 4)
+        table = QTableWidget(0, 4)
         table.setHorizontalHeaderLabels(
             [
                 self.tr("activity"),
@@ -1141,19 +1280,6 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setMinimumHeight(260)
         header = table.horizontalHeader()
-        for row, decision in enumerate(summary.decisions):
-            self._set_table_values(
-                table,
-                row,
-                0,
-                [
-                    str(decision.activity_id),
-                    decision.activity_name,
-                    _format_activity_timestamp_ms(decision.begin_timestamp_ms),
-                    _format_duration_adaptive(decision.duration_s),
-                ],
-            )
-        table.resizeColumnsToContents()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -1174,15 +1300,106 @@ class MainWindow(QMainWindow):
         confirm_row.addWidget(confirm_input)
         layout.addLayout(confirm_row)
 
+        status_label = QLabel("")
+        status_label.setWordWrap(True)
+        layout.addWidget(status_label)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_button = buttons.button(QDialogButtonBox.Ok)
         ok_button.setEnabled(False)
-        confirm_input.textChanged.connect(lambda text: ok_button.setEnabled(text == "DELETE"))
+
+        preview_summary: PurgeSummary | None = None
+        preview_dates: tuple[date, date] | None = None
+        preview_include_unsigned: bool | None = None
+
+        def refresh_ok() -> None:
+            ok_button.setEnabled(
+                preview_summary is not None
+                and preview_dates == (start_input.date().toPython(), end_input.date().toPython())
+                and preview_include_unsigned == include_unsigned.isChecked()
+                and bool(preview_summary.decisions)
+                and confirm_input.text() == "DELETE"
+            )
+
+        def populate_table(summary: PurgeSummary) -> None:
+            table.setRowCount(len(summary.decisions))
+            for row, decision in enumerate(summary.decisions):
+                self._set_table_values(
+                    table,
+                    row,
+                    0,
+                    [
+                        str(decision.activity_id),
+                        decision.activity_name,
+                        _format_activity_timestamp_ms(decision.begin_timestamp_ms),
+                        _format_duration_adaptive(decision.duration_s),
+                    ],
+                )
+            table.resizeColumnsToContents()
+            QTimer.singleShot(0, enable_interactive_column_resize)
+
+        def scan() -> None:
+            nonlocal preview_summary, preview_dates, preview_include_unsigned
+            start_date = start_input.date().toPython()
+            end_date = end_input.date().toPython()
+            include_unsigned_value = include_unsigned.isChecked()
+            if include_unsigned_value:
+                if (
+                    QMessageBox.warning(
+                        dialog,
+                        self.tr("confirm_purge"),
+                        self.tr("purge_unsigned_warning"),
+                        QMessageBox.Ok | QMessageBox.Cancel,
+                        QMessageBox.Cancel,
+                    )
+                    != QMessageBox.Ok
+                ):
+                    return
+            scan_button.setEnabled(False)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            error_message = ""
+            try:
+                summary = self._purge_task(
+                    settings,
+                    start_date,
+                    end_date,
+                    dry_run=True,
+                    include_unsigned=include_unsigned_value,
+                )
+            except Exception as exc:
+                preview_summary = None
+                preview_dates = None
+                preview_include_unsigned = None
+                error_message = _format_file_exception(exc)
+                status_label.setText(error_message)
+            finally:
+                QApplication.restoreOverrideCursor()
+                scan_button.setEnabled(True)
+            if error_message:
+                refresh_ok()
+                self._show_error(error_message)
+                return
+            preview_summary = summary
+            preview_dates = (start_date, end_date)
+            preview_include_unsigned = include_unsigned_value
+            populate_table(summary)
+            message = _format_purge(summary, self.tr, include_details=False)
+            self._append_status_log(message)
+            status_label.setText(message if summary.decisions else self.tr("no_purge_matches"))
+            refresh_ok()
+
+        scan_button.clicked.connect(scan)
+        confirm_input.textChanged.connect(lambda _text: refresh_ok())
+        start_input.dateChanged.connect(lambda _date: refresh_ok())
+        end_input.dateChanged.connect(lambda _date: refresh_ok())
+        include_unsigned.toggled.connect(lambda _checked: refresh_ok())
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.resize(760, 380)
-        return dialog.exec() == QDialog.Accepted
+        if dialog.exec() != QDialog.Accepted or preview_dates is None or preview_include_unsigned is None:
+            return None
+        return (*preview_dates, preview_include_unsigned)
 
     def _login_task(self, settings: GarminSettings) -> AuthenticatedUser:
         garmin = self._garmin(settings)
@@ -1216,6 +1433,7 @@ class MainWindow(QMainWindow):
         start_date: date,
         end_date: date,
         dry_run: bool,
+        include_unsigned: bool = False,
     ) -> PurgeSummary:
         return SyncService().purge(
             self._garmin_authenticated(settings),
@@ -1223,6 +1441,22 @@ class MainWindow(QMainWindow):
             end_date=end_date,
             dry_run=dry_run,
             chunk_days=PURGE_CHUNK_DAYS,
+            include_unsigned=include_unsigned,
+        )
+
+    def _backup_task(self, settings: GarminSettings, backup: BackupSettings, emit) -> BackupSummary:
+        def on_progress(event: str, activity, details: dict) -> None:
+            emit(("backup-progress", (event, activity, details)))
+
+        return SyncService().backup(
+            self._garmin_authenticated(settings),
+            start_date=backup.start_date,
+            end_date=backup.end_date,
+            output_dir=backup.output_dir,
+            include_gcu=backup.include_gcu,
+            include_non_gcu=backup.include_non_gcu,
+            chunk_days=PURGE_CHUNK_DAYS,
+            on_progress=on_progress,
         )
 
     def _precheck_task(
@@ -1555,6 +1789,9 @@ class MainWindow(QMainWindow):
             self._append_status_log(message)
             self._mark_file_uploading(track.track_file.source_path)
             self._update_message_row(track.track_file.source_path, message)
+        elif kind == "backup-progress":
+            event, activity, details = payload
+            self._append_status_log(_format_backup_progress(event, activity, details, self.tr))
         elif kind == "status":
             path, plan, message = payload
             self._update_status_row(path, plan, message)
@@ -1563,6 +1800,11 @@ class MainWindow(QMainWindow):
 
     def _on_purge_done(self, summary: PurgeSummary) -> None:
         self._append_status_log(_format_purge(summary, self.tr, include_details=False))
+
+    def _on_backup_done(self, summary: BackupSummary) -> None:
+        message = _format_backup(summary, self.tr, include_details=False)
+        self.statusBar().showMessage(message)
+        self._append_status_log(message)
 
     def _render_tracks(self, tracks: list[LocalTrack]) -> None:
         self.files = [track.track_file.source_path for track in tracks]
@@ -1815,9 +2057,8 @@ class MainWindow(QMainWindow):
         self.login_button.setText(self.tr("logout") if self._authenticated else self.tr("login"))
 
         authenticated_idle = self._authenticated and not task_running
-        self.purge_start.setEnabled(authenticated_idle)
-        self.purge_end.setEnabled(authenticated_idle)
         self.purge_button.setEnabled(authenticated_idle)
+        self.backup_button.setEnabled(authenticated_idle)
 
         self.files_table.setEnabled(self._authenticated)
         file_controls_enabled = authenticated_idle
@@ -1863,9 +2104,6 @@ class MainWindow(QMainWindow):
             username=self.username_input.text().strip(),
             password=self.password_input.text(),
         )
-
-    def _purge_settings(self) -> tuple[date, date]:
-        return self.purge_start.date().toPython(), self.purge_end.date().toPython()
 
     def _garmin(self, settings: GarminSettings) -> GarminClient:
         return GarminClient(domain=settings.domain, session_dir=settings.session_dir)
@@ -2018,6 +2256,8 @@ def _localized_decision_message(message: str, tr) -> str:
         "no matching remote activity": "decision_no_matching_remote",
         "signed GCU activity": "decision_signed_gcu",
         "signed GCU activity deleted": "decision_signed_deleted",
+        "unsigned activity": "decision_unsigned_activity",
+        "unsigned activity deleted": "decision_unsigned_deleted",
         "remote token match": "decision_remote_token_match",
         "legacy activity already has token": "decision_legacy_has_token",
         "legacy activity match": "decision_legacy_match",
@@ -2184,6 +2424,57 @@ def _format_purge(summary: PurgeSummary, tr, include_details: bool = True) -> st
             f"{decision.activity_name}"
         )
     return "\n".join(lines).rstrip()
+
+
+def _format_backup_progress(event: str, activity, details: dict, tr) -> str:
+    if event == "list":
+        return tr(
+            "backup_progress_list",
+            start_date=details.get("start_date", ""),
+            end_date=details.get("end_date", ""),
+        )
+    if activity is None:
+        return event
+    if event == "download":
+        return tr("backup_progress_download", activity_id=activity.activity_id, name=activity.activity_name)
+    if event == "downloaded":
+        return tr(
+            "backup_progress_downloaded",
+            activity_id=activity.activity_id,
+            path=details.get("output_path", ""),
+        )
+    return f"{event}: activity={activity.activity_id} {activity.activity_name}"
+
+
+def _format_backup(summary: BackupSummary, tr, include_details: bool = True) -> str:
+    failed_count = _backup_failed_count(summary)
+    lines = [
+        f"{tr('date_range')}: {summary.start_date.isoformat()} to {summary.end_date.isoformat()}",
+        f"{tr('scanned')}: {summary.scanned_count}",
+        f"{tr('matched')}: {summary.matched_count}",
+        f"{tr('downloaded')}: {summary.downloaded_count}",
+        f"{tr('failed')}: {failed_count}",
+        f"{tr('skipped')}: {summary.skipped_count}",
+        f"{tr('backup_target')}: {summary.output_dir}",
+    ]
+    if not include_details:
+        return tr(
+            "backup_done",
+            scanned=summary.scanned_count,
+            matched=summary.matched_count,
+            downloaded=summary.downloaded_count,
+            failed=failed_count,
+            skipped=summary.skipped_count,
+        )
+    lines.append("")
+    for decision in summary.decisions:
+        output = f" -> {decision.output_path}" if decision.output_path is not None else ""
+        lines.append(f"{decision.status} activity={decision.activity_id} {decision.activity_name}{output}")
+    return "\n".join(lines).rstrip()
+
+
+def _backup_failed_count(summary: BackupSummary) -> int:
+    return sum(1 for decision in summary.decisions if decision.status == "failed")
 
 
 def main() -> int:

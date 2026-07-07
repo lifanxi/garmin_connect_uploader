@@ -10,6 +10,7 @@ from gcu.app.models import RemoteActivity
 from gcu.app.precheck_service import PrecheckService
 from gcu.app.sync_service import SyncOptions, SyncService
 from gcu.cli.output import (
+    print_backup_summary,
     print_authenticated_user,
     print_decisions,
     print_local_tracks,
@@ -31,6 +32,9 @@ class EmptyGarmin:
 
     def update_activity_name(self, activity_id: int, activity_name: str):
         raise RuntimeError("offline mode cannot update Garmin metadata")
+
+    def download_activity_files(self, activity_id: int) -> list[tuple[str, bytes]]:
+        raise RuntimeError("offline mode cannot download")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,6 +127,34 @@ def build_parser() -> argparse.ArgumentParser:
     purge_parser.add_argument("--chunk-days", type=int, default=366, help="Activity search window size in days")
     purge_parser.add_argument("--json", action="store_true", help="Emit JSON")
     purge_parser.set_defaults(func=cmd_purge)
+
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="Download Garmin activities as original track files",
+    )
+    add_garmin_args(backup_parser)
+    backup_parser.add_argument(
+        "--start-date",
+        type=_date_arg,
+        default=date(1970, 1, 1),
+        help="First activity date to scan, default: 1970-01-01",
+    )
+    backup_parser.add_argument(
+        "--end-date",
+        type=_date_arg,
+        default=None,
+        help="Last activity date to scan, default: today",
+    )
+    backup_parser.add_argument("--output-dir", type=Path, required=True, help="Directory for downloaded track files")
+    backup_parser.add_argument(
+        "--include",
+        choices=("all", "gcu", "non-gcu"),
+        default="all",
+        help="Activity type filter, default: all",
+    )
+    backup_parser.add_argument("--chunk-days", type=int, default=366, help="Activity search window size in days")
+    backup_parser.add_argument("--json", action="store_true", help="Emit JSON")
+    backup_parser.set_defaults(func=cmd_backup)
 
     auth_parser = subparsers.add_parser("auth", help="Manage Garmin authentication")
     auth_sub = auth_parser.add_subparsers(dest="auth_command", required=True)
@@ -253,6 +285,24 @@ def cmd_purge(args) -> int:
     )
     print_purge_summary(summary, as_json=args.json)
     return 0
+
+
+def cmd_backup(args) -> int:
+    garmin = _garmin(args)
+    garmin.ensure_session(args.username, args.password)
+    include_gcu = args.include in {"all", "gcu"}
+    include_non_gcu = args.include in {"all", "non-gcu"}
+    summary = SyncService().backup(
+        garmin,
+        start_date=args.start_date,
+        end_date=args.end_date or date.today(),
+        output_dir=args.output_dir,
+        include_gcu=include_gcu,
+        include_non_gcu=include_non_gcu,
+        chunk_days=args.chunk_days,
+    )
+    print_backup_summary(summary, as_json=args.json)
+    return 2 if any(item.status == "failed" for item in summary.decisions) else 0
 
 
 def cmd_auth_login(args) -> int:

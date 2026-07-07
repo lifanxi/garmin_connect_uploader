@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from gcu.app.models import AuthenticatedUser, LocalTrack, PrecheckReport, PurgeSummary, SyncDecision
+from gcu.app.models import AuthenticatedUser, BackupSummary, LocalTrack, PrecheckReport, PurgeSummary, SyncDecision
 
 
 def print_local_tracks(items: list[LocalTrack], as_json: bool = False) -> None:
@@ -56,6 +56,28 @@ def print_purge_summary(summary: PurgeSummary, as_json: bool = False) -> None:
             f"{item.status:<{width}} activity={item.activity_id} "
             f"manufacturer={item.manufacturer} deviceId={item.device_id} {item.activity_name}"
         )
+
+
+def print_backup_summary(summary: BackupSummary, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(_jsonable(summary), ensure_ascii=False, indent=2))
+        return
+
+    print(
+        f"scanned={summary.scanned_count} matched={summary.matched_count} "
+        f"skipped={summary.skipped_count} downloaded={summary.downloaded_count} "
+        f"failed={_backup_failed_count(summary)} "
+        f"output_dir={summary.output_dir}"
+    )
+    width = max([len(item.status) for item in summary.decisions] + [6])
+    for item in summary.decisions:
+        output = f" -> {item.output_path}" if item.output_path is not None else ""
+        message = f" {item.message}" if item.message else ""
+        print(f"{item.status:<{width}} activity={item.activity_id} {item.activity_name}{output}{message}")
+
+
+def _backup_failed_count(summary: BackupSummary) -> int:
+    return sum(1 for item in summary.decisions if item.status == "failed")
 
 
 def print_precheck_report(report: PrecheckReport, as_json: bool = False) -> None:

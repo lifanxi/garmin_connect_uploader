@@ -105,6 +105,31 @@ class PurgeSummary:
 
 
 @dataclass(frozen=True)
+class BackupDecision:
+    activity_id: int
+    activity_name: str
+    status: str
+    output_path: Path | None = None
+    manufacturer: str | None = None
+    device_id: int | None = None
+    begin_timestamp_ms: int | None = None
+    duration_s: float | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class BackupSummary:
+    start_date: date
+    end_date: date
+    scanned_count: int
+    matched_count: int
+    downloaded_count: int
+    skipped_count: int
+    output_dir: Path
+    decisions: tuple[BackupDecision, ...] = ()
+
+
+@dataclass(frozen=True)
 class DuplicateTrackGroup:
     token: str
     source_paths: tuple[Path, ...]

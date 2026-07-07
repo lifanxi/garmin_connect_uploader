@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import tempfile
 import time
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from math import ceil
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from gcu.app.models import LocalTrack, PurgeDecision, PurgeSummary, RemoteActivity, SyncDecision
+from gcu.app.models import (
+    BackupDecision,
+    BackupSummary,
+    LocalTrack,
+    PurgeDecision,
+    PurgeSummary,
+    RemoteActivity,
+    SyncDecision,
+)
 from gcu.app.naming import planned_activity_name
 from gcu.duplicate.fingerprint import append_or_replace_token, fingerprint_track
 from gcu.duplicate.fingerprint import extract_token
@@ -33,8 +42,12 @@ class GarminGateway(Protocol):
     def delete_activity(self, activity_id: int):
         ...
 
+    def download_activity_files(self, activity_id: int) -> list[tuple[str, bytes]]:
+        ...
+
 
 ProgressCallback = Callable[[str, LocalTrack, dict[str, Any]], None]
+BackupProgressCallback = Callable[[str, RemoteActivity | None, dict[str, Any]], None]
 CancelCallback = Callable[[], bool]
 
 
@@ -318,6 +331,7 @@ class SyncService:
         end_date: date,
         dry_run: bool = False,
         chunk_days: int = 366,
+        include_unsigned: bool = False,
     ) -> PurgeSummary:
         decisions: list[PurgeDecision] = []
         skipped_unsigned_count = 0
@@ -332,7 +346,8 @@ class SyncService:
                     continue
                 seen_activity_ids.add(activity.activity_id)
                 scanned_count += 1
-                if not is_gcu_activity(activity):
+                signed = is_gcu_activity(activity)
+                if not signed and not include_unsigned:
                     skipped_unsigned_count += 1
                     continue
 
@@ -346,7 +361,7 @@ class SyncService:
                             device_id=activity.device_id,
                             begin_timestamp_ms=activity.begin_timestamp_ms,
                             duration_s=activity.duration_s,
-                            message="signed GCU activity",
+                            message="signed GCU activity" if signed else "unsigned activity",
                         )
                     )
                     continue
@@ -362,7 +377,7 @@ class SyncService:
                         device_id=activity.device_id,
                         begin_timestamp_ms=activity.begin_timestamp_ms,
                         duration_s=activity.duration_s,
-                        message="signed GCU activity deleted",
+                        message="signed GCU activity deleted" if signed else "unsigned activity deleted",
                     )
                 )
 
@@ -376,6 +391,107 @@ class SyncService:
             dry_run=dry_run,
             decisions=tuple(decisions),
         )
+
+    def backup(
+        self,
+        garmin: GarminGateway,
+        start_date: date,
+        end_date: date,
+        output_dir: Path,
+        include_gcu: bool = True,
+        include_non_gcu: bool = True,
+        chunk_days: int = 366,
+        on_progress: BackupProgressCallback | None = None,
+    ) -> BackupSummary:
+        if not include_gcu and not include_non_gcu:
+            raise ValueError("At least one backup activity type must be selected")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        decisions: list[BackupDecision] = []
+        scanned_count = 0
+        downloaded_count = 0
+        skipped_count = 0
+        seen_activity_ids: set[int] = set()
+
+        for chunk_start, chunk_end in _date_chunks(start_date, end_date, max(1, chunk_days)):
+            self._emit_backup_progress(
+                on_progress,
+                "list",
+                None,
+                start_date=chunk_start,
+                end_date=chunk_end,
+            )
+            activities = garmin.list_activities(chunk_start, chunk_end)
+            for activity in activities:
+                if activity.activity_id in seen_activity_ids:
+                    continue
+                seen_activity_ids.add(activity.activity_id)
+                scanned_count += 1
+
+                signed = is_gcu_activity(activity)
+                if (signed and not include_gcu) or (not signed and not include_non_gcu):
+                    skipped_count += 1
+                    continue
+
+                try:
+                    self._emit_backup_progress(on_progress, "download", activity)
+                    downloaded_files = garmin.download_activity_files(activity.activity_id)
+                except Exception as exc:
+                    message = str(exc).strip()
+                    decisions.append(
+                        BackupDecision(
+                            activity_id=activity.activity_id,
+                            activity_name=activity.activity_name,
+                            status="failed",
+                            manufacturer=activity.manufacturer,
+                            device_id=activity.device_id,
+                            begin_timestamp_ms=activity.begin_timestamp_ms,
+                            duration_s=activity.duration_s,
+                            message=f"{type(exc).__name__}: {message}" if message else type(exc).__name__,
+                        )
+                    )
+                    continue
+
+                for downloaded in downloaded_files:
+                    filename, data = _downloaded_file_parts(downloaded)
+                    output_path = output_dir / _backup_activity_filename(activity, filename)
+                    output_path.write_bytes(data)
+                    downloaded_count += 1
+                    decisions.append(
+                        BackupDecision(
+                            activity_id=activity.activity_id,
+                            activity_name=activity.activity_name,
+                            status="downloaded",
+                            output_path=output_path,
+                            manufacturer=activity.manufacturer,
+                            device_id=activity.device_id,
+                            begin_timestamp_ms=activity.begin_timestamp_ms,
+                            duration_s=activity.duration_s,
+                            message="track file downloaded",
+                        )
+                    )
+                    self._emit_backup_progress(on_progress, "downloaded", activity, output_path=output_path)
+
+        return BackupSummary(
+            start_date=start_date,
+            end_date=end_date,
+            scanned_count=scanned_count,
+            matched_count=len(decisions),
+            downloaded_count=downloaded_count,
+            skipped_count=skipped_count,
+            output_dir=output_dir,
+            decisions=tuple(decisions),
+        )
+
+    def _emit_backup_progress(
+        self,
+        on_progress: BackupProgressCallback | None,
+        event: str,
+        activity: RemoteActivity | None,
+        **details: Any,
+    ) -> None:
+        if on_progress is not None:
+            on_progress(event, activity, details)
 
     def _load_local_track(self, path: Path, options: SyncOptions) -> LocalTrack:
         reader = get_reader(path, options.format_options)
@@ -598,3 +714,45 @@ def _date_chunks(start_date: date, end_date: date, chunk_days: int):
         chunk_end = min(end_date, current + timedelta(days=chunk_days - 1))
         yield current, chunk_end
         current = chunk_end + timedelta(days=1)
+
+
+def _backup_activity_filename(activity: RemoteActivity, original_filename: str) -> str:
+    timestamp = "unknown"
+    if activity.begin_timestamp_ms is not None:
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime(activity.begin_timestamp_ms / 1000))
+    suffix = Path(original_filename).suffix.lower()
+    name = _safe_filename_part(_activity_name_without_gcu_token(activity.activity_name)) or "activity"
+    return f"{timestamp}_{activity.activity_id}_{name}{suffix}"
+
+
+def _activity_name_without_gcu_token(value: str) -> str:
+    return re.sub(r"\s*\[gcu:v1:[0-9a-fA-F]{16}\]\s*", " ", value).strip()
+
+
+def _downloaded_file_parts(value) -> tuple[str, bytes]:
+    filename = getattr(value, "filename", None)
+    data = getattr(value, "data", None)
+    if filename is not None and data is not None:
+        return str(filename), data
+    filename, data = value
+    return str(filename), data
+
+
+_WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def _safe_filename_part(value: str, max_length: int = 80) -> str:
+    safe = "".join(character if character.isalnum() or character in "._- " else "_" for character in value)
+    safe = "_".join(safe.split())
+    safe = re.sub(r"_+", "_", safe)
+    safe = safe[:max_length].strip("._- ")
+    if safe.upper().split(".", 1)[0] in _WINDOWS_RESERVED_FILENAMES:
+        safe = f"_{safe}"
+    return safe
