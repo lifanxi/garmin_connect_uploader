@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -204,7 +205,8 @@ TRANSLATIONS = {
         "start": "Start",
         "end": "End",
         "duration": "Duration",
-        "delete_matched": "Clean Uploaded Tracks",
+        "date_range": "Date range",
+        "delete_matched": "Clean Uploaded Activities",
         "backup": "Backup",
         "settings": "Settings",
         "settings_title": "Settings",
@@ -266,8 +268,8 @@ TRANSLATIONS = {
         "previewing_purge": "Previewing purge",
         "deleting_signed": "Deleting signed activities",
         "deleting_activities": "Deleting activities",
-        "confirm_purge": "Confirm purge",
-        "confirm_purge_text": "The uploaded tracks above will be deleted. Type DELETE below to continue:",
+        "confirm_purge": "Clean Uploaded Activities",
+        "confirm_purge_text": "The activities above will be deleted. Type DELETE below to continue:",
         "purge_include_unsigned": "Include activities not uploaded by this tool",
         "purge_unsigned_warning": "This operation will delete all Garmin Connect activities in the selected date range, including activities not uploaded by this tool.",
         "confirm_text": "Confirm",
@@ -397,7 +399,8 @@ TRANSLATIONS = {
         "start": "开始",
         "end": "结束",
         "duration": "时长",
-        "delete_matched": "清理已上传轨迹",
+        "date_range": "日期范围",
+        "delete_matched": "清理已上传活动",
         "backup": "备份",
         "settings": "配置",
         "settings_title": "配置",
@@ -459,8 +462,8 @@ TRANSLATIONS = {
         "previewing_purge": "正在预览清理",
         "deleting_signed": "正在删除签名活动",
         "deleting_activities": "正在删除活动",
-        "confirm_purge": "确认清理",
-        "confirm_purge_text": "以上已上传轨迹将被删除，请在下输入 DELETE 以继续：",
+        "confirm_purge": "清理已上传活动",
+        "confirm_purge_text": "以上活动将被删除，请在下输入 DELETE 以继续：",
         "purge_include_unsigned": "包含非本工具上传的活动",
         "purge_unsigned_warning": "本操作会清理掉 Garmin Connect 上指定时间区间中所有的活动，包括非本工具上传的活动。",
         "confirm_text": "确认",
@@ -1230,20 +1233,21 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle(self.tr("settings_title"))
         layout = QVBoxLayout(dialog)
 
-        city_row = QHBoxLayout()
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
         city_input = QLineEdit()
         city_input.setText(self._name_settings.home_city)
-        city_row.addWidget(QLabel(self.tr("settings_home_city")))
-        city_row.addWidget(city_input, 1)
-        layout.addLayout(city_row)
+        city_input.setMinimumWidth(360)
 
-        template_row = QHBoxLayout()
         template_input = QLineEdit()
         template_input.setText(self._name_settings.name_template)
         template_input.setMinimumWidth(360)
-        template_row.addWidget(QLabel(self.tr("settings_name_template")))
-        template_row.addWidget(template_input, 1)
-        layout.addLayout(template_row)
+
+        form.addRow(self.tr("settings_home_city"), city_input)
+        form.addRow(self.tr("settings_name_template"), template_input)
+        layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -1282,38 +1286,47 @@ class MainWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
         dates = QHBoxLayout()
         start_input = QDateEdit()
         start_input.setCalendarPopup(True)
+        start_input.setDisplayFormat("yyyy-MM-dd")
         start_input.setDate(date(1970, 1, 1))
+        start_input.setMinimumWidth(132)
         end_input = QDateEdit()
         end_input.setCalendarPopup(True)
+        end_input.setDisplayFormat("yyyy-MM-dd")
         end_input.setDate(date.today())
+        end_input.setMinimumWidth(132)
         dates.addWidget(QLabel(self.tr("start")))
         dates.addWidget(start_input)
         dates.addWidget(QLabel(self.tr("end")))
         dates.addWidget(end_input)
         dates.addStretch(1)
-        layout.addLayout(dates)
+        form.addRow(self.tr("date_range"), dates)
 
         type_row = QHBoxLayout()
         include_gcu = QCheckBox(self.tr("backup_gcu"))
         include_non_gcu = QCheckBox(self.tr("backup_non_gcu"))
         include_gcu.setChecked(True)
         include_non_gcu.setChecked(True)
-        type_row.addWidget(QLabel(self.tr("backup_type")))
         type_row.addWidget(include_gcu)
         type_row.addWidget(include_non_gcu)
         type_row.addStretch(1)
-        layout.addLayout(type_row)
+        form.addRow(self.tr("backup_type"), type_row)
 
         target_row = QHBoxLayout()
         target_input = QLineEdit()
+        target_input.setMinimumWidth(320)
         target_button = QPushButton(self.tr("browse"))
-        target_row.addWidget(QLabel(self.tr("backup_target")))
+        target_button.setMinimumWidth(96)
         target_row.addWidget(target_input, 1)
         target_row.addWidget(target_button)
-        layout.addLayout(target_row)
+        form.addRow(self.tr("backup_target"), target_row)
+        layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_button = buttons.button(QDialogButtonBox.Ok)
@@ -1337,7 +1350,7 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         refresh_ok()
-        dialog.resize(560, dialog.minimumSizeHint().height())
+        dialog.resize(580, dialog.minimumSizeHint().height())
 
         if dialog.exec() != QDialog.Accepted:
             return None
@@ -1366,15 +1379,24 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle(self.tr("confirm_purge"))
         layout = QVBoxLayout(dialog)
 
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
         dates = QHBoxLayout()
         start_input = QDateEdit()
         start_input.setCalendarPopup(True)
+        start_input.setDisplayFormat("yyyy-MM-dd")
         start_input.setDate(date(1970, 1, 1))
+        start_input.setMinimumWidth(132)
         end_input = QDateEdit()
         end_input.setCalendarPopup(True)
+        end_input.setDisplayFormat("yyyy-MM-dd")
         end_input.setDate(date.today())
+        end_input.setMinimumWidth(132)
         include_unsigned = QCheckBox(self.tr("purge_include_unsigned"))
         scan_button = QPushButton(self.tr("scan_purge"))
+        scan_button.setMinimumWidth(96)
         dates.addWidget(QLabel(self.tr("start")))
         dates.addWidget(start_input)
         dates.addWidget(QLabel(self.tr("end")))
@@ -1382,7 +1404,8 @@ class MainWindow(QMainWindow):
         dates.addWidget(include_unsigned)
         dates.addWidget(scan_button)
         dates.addStretch(1)
-        layout.addLayout(dates)
+        form.addRow(self.tr("date_range"), dates)
+        layout.addLayout(form)
 
         table = QTableWidget(0, 4)
         table.setHorizontalHeaderLabels(
@@ -1415,6 +1438,7 @@ class MainWindow(QMainWindow):
 
         confirm_row = QHBoxLayout()
         confirm_input = QLineEdit()
+        confirm_input.setMinimumWidth(420)
         confirm_row.addWidget(confirm_input)
         layout.addLayout(confirm_row)
 
@@ -1514,7 +1538,7 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        dialog.resize(760, 380)
+        dialog.resize(860, 460)
         if dialog.exec() != QDialog.Accepted or preview_dates is None or preview_include_unsigned is None:
             return None
         return (*preview_dates, preview_include_unsigned)

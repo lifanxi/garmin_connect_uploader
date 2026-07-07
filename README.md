@@ -173,7 +173,7 @@ Use **Settings** in the maintenance section to set a home city and activity name
 template for GUI inspect/run operations. Empty values keep the defaults. The GUI
 saves these values to `settings.yaml` in the working directory.
 
-Use **Clean Uploaded Tracks** to delete remote activities uploaded by this tool.
+Use **Clean Uploaded Activities** to delete remote activities uploaded by this tool.
 The GUI previews matching activities in a confirmation dialog, and deletion
 requires typing `DELETE`. The dialog also has an unchecked option to include
 activities not uploaded by this tool; enabling it requires accepting an
