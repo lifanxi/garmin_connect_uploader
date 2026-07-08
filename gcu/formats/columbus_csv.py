@@ -132,7 +132,7 @@ class ColumbusCsvReader:
             latitude=self._parse_coordinate(row["LATITUDE N/S"].strip()),
             longitude=self._parse_coordinate(row["LONGITUDE E/W"].strip()),
             altitude_m=float(row["HEIGHT"]) if row.get("HEIGHT") not in (None, "") else None,
-            speed_mps=self._kmh_to_mps(float(row["SPEED"])) if row.get("SPEED") not in (None, "") else None,
+            speed_mps=self._parse_speed_mps(row.get("SPEED")),
             heading_deg=float(row["HEADING"]) if row.get("HEADING") not in (None, "") else None,
         )
 
@@ -158,6 +158,14 @@ class ColumbusCsvReader:
 
     def _kmh_to_mps(self, speed_kmh: float) -> float:
         return speed_kmh / 3.6
+
+    def _parse_speed_mps(self, value: str | None) -> float | None:
+        if value in (None, ""):
+            return None
+        speed_kmh = float(value)
+        if speed_kmh < 0:
+            return None
+        return self._kmh_to_mps(speed_kmh)
 
     def _default_display_name(
         self,

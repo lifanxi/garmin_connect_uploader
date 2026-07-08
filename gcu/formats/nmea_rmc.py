@@ -108,7 +108,7 @@ class NmeaRmcReader:
         timestamp_utc = self._parse_datetime(fields[1], fields[9])
         latitude = self._parse_coordinate(fields[3], fields[4], is_latitude=True)
         longitude = self._parse_coordinate(fields[5], fields[6], is_latitude=False)
-        speed_mps = self._knots_to_mps(float(fields[7])) if fields[7] else None
+        speed_mps = self._parse_speed_mps(fields[7])
         heading_deg = float(fields[8]) if fields[8] else None
         return TrackPoint(
             timestamp_utc=timestamp_utc,
@@ -150,6 +150,14 @@ class NmeaRmcReader:
 
     def _knots_to_mps(self, speed_knots: float) -> float:
         return speed_knots * 0.514444
+
+    def _parse_speed_mps(self, value: str) -> float | None:
+        if not value:
+            return None
+        speed_knots = float(value)
+        if speed_knots < 0:
+            return None
+        return self._knots_to_mps(speed_knots)
 
     def _verify_checksum(self, line: str) -> None:
         if "*" not in line:

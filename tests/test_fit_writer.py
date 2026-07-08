@@ -12,17 +12,18 @@ from gcu.app.models import Track, TrackMetadata, TrackPoint
 from gcu.export.fit_writer import write_fit
 
 
-def _build_track(*altitudes: float | None) -> Track:
+def _build_track(*altitudes: float | None, speeds: tuple[float | None, ...] | None = None) -> Track:
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     points = []
     for index, altitude in enumerate(altitudes):
+        speed = speeds[index] if speeds is not None else 2.0
         points.append(
             TrackPoint(
                 timestamp_utc=start + timedelta(seconds=index),
                 latitude=30.0 + index * 0.0001,
                 longitude=120.0 + index * 0.0001,
                 altitude_m=altitude,
-                speed_mps=2.0,
+                speed_mps=speed,
             )
         )
     metadata = TrackMetadata(
@@ -49,6 +50,16 @@ def _extract_record_altitudes(path: Path) -> list[tuple[float | None, float | No
     return records
 
 
+def _extract_record_speeds(path: Path) -> list[tuple[float | None, float | None]]:
+    fit_file = FitFile.from_file(str(path))
+    records = []
+    for rec in fit_file.records:
+        msg = rec.message
+        if isinstance(msg, RecordMessage):
+            records.append((msg.speed, msg.enhanced_speed))
+    return records
+
+
 class FitWriterTests(unittest.TestCase):
     def test_fit_writer_skips_extreme_negative_altitudes(self):
         track = _build_track(-55990.0, -600.0, -500.0, -100.0, 10.0, 13000.0)
@@ -64,3 +75,20 @@ class FitWriterTests(unittest.TestCase):
             self.assertEqual(records[3], (-100.0, -100.0))
             self.assertEqual(records[4], (10.0, 10.0))
             self.assertEqual(records[5], (None, 13000.0))
+
+    def test_fit_writer_skips_negative_speeds(self):
+        track = _build_track(
+            1.0,
+            1.0,
+            1.0,
+            speeds=(-1.0, 2.0, 100.0),
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "track.fit"
+
+            write_fit(track, output)
+
+            records = _extract_record_speeds(output)
+            self.assertEqual(records[0], (None, None))
+            self.assertEqual(records[1], (2.0, None))
+            self.assertEqual(records[2], (None, 100.0))

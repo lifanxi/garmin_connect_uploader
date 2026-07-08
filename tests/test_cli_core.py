@@ -780,6 +780,16 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(track_file.track.points[0].timestamp_utc.hour, 16)
         self.assertEqual(track_file.track.points[0].timestamp_utc.day, 30)
 
+    def test_columbus_reader_treats_negative_speed_as_missing(self):
+        text = """INDEX,TAG,DATE,TIME,LATITUDE N/S,LONGITUDE E/W,HEIGHT,SPEED,HEADING
+1,T,251201,000001,30.0000010N,120.0000010E,1,-1,80
+"""
+        path = self._write_csv(text)
+
+        track_file = ColumbusCsvReader().read(path, FormatOptions(display_city_name="Hangzhou"))
+
+        self.assertIsNone(track_file.track.points[0].speed_mps)
+
     def test_display_timezone_is_independent_from_source_timezone(self):
         text = """INDEX,TAG,DATE,TIME,LATITUDE N/S,LONGITUDE E/W,HEIGHT,SPEED,HEADING
 1,T,251201,180001,30.0000010N,120.0000010E,1,3.6,80
@@ -870,6 +880,16 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(track_file.track.metadata.display_state, "Jiangsu")
         self.assertEqual(track_file.track.metadata.display_name, "Nanjing Track Me")
 
+    def test_nmea_rmc_reader_treats_negative_speed_as_missing(self):
+        path = self._write_file(
+            "$GPRMC,011052.387,A,3203.7744,N,11848.7084,E,-1,26.90,230308,,\n",
+            "track.txt",
+        )
+
+        track_file = NmeaRmcReader().read(path, FormatOptions())
+
+        self.assertIsNone(track_file.track.points[0].speed_mps)
+
     def test_nmea_rmc_reader_detects_us_display_timezone(self):
         path = self._write_file(NMEA_US_TEXT, "track.txt")
         track_file = NmeaRmcReader().read(path, FormatOptions())
@@ -904,6 +924,26 @@ class CoreCliTests(unittest.TestCase):
         self.assertEqual(points[1].speed_mps, 1.25)
         self.assertEqual(points[1].heading_deg, 90)
         self.assertEqual(track_file.track.metadata.display_name, "Hangzhou Track Me")
+
+    def test_gpx_reader_treats_negative_speed_as_missing(self):
+        path = self._write_file(
+            """<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Unit Test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><trkseg>
+    <trkpt lat="30.2781823" lon="120.1404645">
+      <ele>54</ele>
+      <time>2026-03-19T23:54:27Z</time>
+      <speed>-1.0</speed>
+    </trkpt>
+  </trkseg></trk>
+</gpx>
+""",
+            "track.gpx",
+        )
+
+        track_file = GpxReader().read(path, FormatOptions(display_city_name="Hangzhou"))
+
+        self.assertIsNone(track_file.track.points[0].speed_mps)
 
     def test_gpx_reader_accepts_sample_files(self):
         path = self._write_file(

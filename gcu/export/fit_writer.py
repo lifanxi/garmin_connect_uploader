@@ -28,6 +28,15 @@ def _safe_altitude_value(altitude_m: float | None) -> float | None:
     return altitude_m
 
 
+def _safe_speed_value(speed_mps: float | None) -> float | None:
+    """Return speed if it can be safely encoded into FIT speed fields."""
+    if speed_mps is None or not math.isfinite(speed_mps):
+        return None
+    if speed_mps < 0:
+        return None
+    return speed_mps
+
+
 def write_fit(track: Track, output_path: Path, activity_name: str | None = None) -> Path:
     try:
         from fit_tool.fit_file_builder import FitFileBuilder
@@ -78,7 +87,7 @@ def write_fit(track: Track, output_path: Path, activity_name: str | None = None)
             if _FIT_ALTITUDE_MIN_M <= altitude_m <= _FIT_ALTITUDE_LEGACY_MAX_M:
                 record.altitude = altitude_m
 
-        speed_mps = point.speed_mps
+        speed_mps = _safe_speed_value(point.speed_mps)
         if speed_mps is not None:
             if 0 <= speed_mps <= max_speed_mps:
                 record.speed = speed_mps

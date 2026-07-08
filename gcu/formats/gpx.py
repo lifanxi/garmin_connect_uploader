@@ -94,7 +94,7 @@ class GpxReader:
             latitude=latitude,
             longitude=longitude,
             altitude_m=float(altitude_text) if altitude_text not in (None, "") else None,
-            speed_mps=_float_or_none(extension_values.get("speed")),
+            speed_mps=_non_negative_float_or_none(extension_values.get("speed")),
             heading_deg=_float_or_none(extension_values.get("course") or extension_values.get("heading")),
             accuracy_m=_float_or_none(extension_values.get("accuracy") or extension_values.get("hacc")),
             raw_extensions=extension_values,
@@ -163,3 +163,10 @@ def _float_or_none(value: str | None) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
+
+
+def _non_negative_float_or_none(value: str | None) -> float | None:
+    parsed = _float_or_none(value)
+    if parsed is None or parsed < 0:
+        return None
+    return parsed
